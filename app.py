@@ -5,36 +5,47 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 
-app = FastAPI(title="MediaWiki Bridge API", version="1.1.0")
+# -----------------------------------------------------------------------------
+# App configuration
+# -----------------------------------------------------------------------------
+
+app = FastAPI(
+    title="MediaWiki Bridge API",
+    version="1.1.0",
+)
 
 DEFAULT_WIKI = os.getenv("DEFAULT_WIKI", "https://en.wikipedia.org")
 USER_AGENT = os.getenv("USER_AGENT", "mediawiki-bridge/1.1")
 
 ALLOWED_WIKI_HOST_SUFFIXES = tuple(
-    s.strip().lower()
-    for s in os.getenv(
+    suffix.strip().lower()
+    for suffix in os.getenv(
         "ALLOWED_WIKI_HOST_SUFFIXES",
         "wikipedia.org,fandom.com,wiki.gg",
     ).split(",")
-    if s.strip()
+    if suffix.strip()
 )
 
-
-@app.get("/health")
-def health() -> Dict[str, bool]:
-    return {"ok": True}
+HTTP_TIMEOUT = 30.0
 
 
-def normalize_wiki_base(wiki: str) -> str:
-    wiki = wiki.strip()
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+def validate_and_normalize_wiki_base(wiki: str) -> str:
+    """
+    Validate the wiki base URL and normalize it to scheme + hostname only.
+    """
     if not wiki:
         raise HTTPException(status_code=400, detail="wiki is empty")
 
-    if not (wiki.startswith("https://") or wiki.startswith("http://")):
+    if not wiki.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="wiki must start with http or https")
 
     parsed = urlparse(wiki)
     host = (parsed.hostname or "").lower()
+
     if not host:
         raise HTTPException(status_code=400, detail="wiki host is invalid")
 
@@ -44,40 +55,73 @@ def normalize_wiki_base(wiki: str) -> str:
     return f"{parsed.scheme}://{host}"
 
 
-def derive_action_api(base: str) -> str:
+def primary_action_api(base: str) -> str:
+    """
+    Determine the primary MediaWiki action API endpoint.
+    """
     host = urlparse(base).hostname or ""
     if host.endswith("fandom.com"):
         return f"{base}/api.php"
     return f"{base}/w/api.php"
 
 
-async def mw_get(action_api: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    headers = {"User-Agent": USER_AGENT}
-    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
-        r = await client.get(action_api, params=params)
-
-    if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Upstream MediaWiki error {r.status_code}")
-
-    return r.json()
-
-
-async def mw_get_with_fallback(base: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    primary = derive_action_api(base)
-
-    try:
-        return await mw_get(primary, params)
-    except HTTPException as e:
-        if e.status_code != 502:
-            raise
-
+def fallback_action_api(base: str) -> str:
+    """
+    Determine the fallback MediaWiki action API endpoint.
+    """
     host = urlparse(base).hostname or ""
     if host.endswith("fandom.com"):
-        fallback = f"{base}/w/api.php"
-    else:
-        fallback = f"{base}/api.php"
+        return f"{base}/w/api.php"
+    return f"{base}/api.php"
 
-    return await mw_get(fallback, params)
+
+async def mediawiki_get(
+    api_url: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Perform a GET request against a MediaWiki action API.
+    """
+    headers = {"User-Agent": USER_AGENT}
+
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers=headers,
+    ) as client:
+        response = await client.get(api_url, params=params)
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream MediaWiki error {response.status_code}",
+        )
+
+    return response.json()
+
+
+async def mediawiki_get_with_fallback(
+    base: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Try the primary API endpoint, then fall back if it fails.
+    """
+    try:
+        return await mediawiki_get(primary_action_api(base), params)
+    except HTTPException as exc:
+        if exc.status_code != 502:
+            raise
+
+    return await mediawiki_get(fallback_action_api(base), params)
+
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
+
+@app.get("/health")
+def health() -> Dict[str, bool]:
+    return {"ok": True}
 
 
 @app.get("/search")
@@ -86,9 +130,9 @@ async def search(
     limit: int = Query(5, ge=1, le=20),
     wiki: Optional[str] = Query(None, min_length=1),
 ) -> Dict[str, Any]:
-    base = normalize_wiki_base(wiki or DEFAULT_WIKI)
+    base = validate_and_normalize_wiki_base(wiki or DEFAULT_WIKI)
 
-    data = await mw_get_with_fallback(
+    data = await mediawiki_get_with_fallback(
         base,
         {
             "action": "query",
@@ -99,18 +143,22 @@ async def search(
         },
     )
 
-    results = []
-    for item in data.get("query", {}).get("search", []):
-        results.append(
-            {
-                "title": item.get("title"),
-                "pageid": item.get("pageid"),
-                "snippet": item.get("snippet"),
-                "timestamp": item.get("timestamp"),
-            }
-        )
+    results = [
+        {
+            "title": item.get("title"),
+            "pageid": item.get("pageid"),
+            "snippet": item.get("snippet"),
+            "timestamp": item.get("timestamp"),
+        }
+        for item in data.get("query", {}).get("search", [])
+    ]
 
-    return {"wiki": base, "query": q, "limit": limit, "results": results}
+    return {
+        "wiki": base,
+        "query": q,
+        "limit": limit,
+        "results": results,
+    }
 
 
 @app.get("/page")
@@ -118,9 +166,9 @@ async def page(
     title: str = Query(..., min_length=1),
     wiki: Optional[str] = Query(None, min_length=1),
 ) -> Dict[str, Any]:
-    base = normalize_wiki_base(wiki or DEFAULT_WIKI)
+    base = validate_and_normalize_wiki_base(wiki or DEFAULT_WIKI)
 
-    data = await mw_get_with_fallback(
+    data = await mediawiki_get_with_fallback(
         base,
         {
             "action": "query",
