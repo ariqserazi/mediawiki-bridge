@@ -57,6 +57,90 @@ def slugify_topic(topic: str) -> str:
 
     return "".join(cleaned)
 
+def _tokenize_topic(topic: str) -> List[str]:
+    s = topic.strip().lower()
+    if not s:
+        raise HTTPException(status_code=400, detail="topic is empty")
+
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return [t for t in s.split(" ") if t]
+
+
+def _is_roman_numeral(t: str) -> bool:
+    return t in {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+
+
+def _candidate_slugs(topic: str) -> List[str]:
+    tokens = _tokenize_topic(topic)
+
+    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
+    cleaned = [t for t in tokens if t not in stop]
+
+    def join(ts: List[str]) -> str:
+        return "".join(ts)
+
+    candidates: List[str] = []
+
+    if cleaned:
+        candidates.append(join(cleaned))
+    candidates.append(join(tokens))
+
+    no_roman = [t for t in cleaned if not _is_roman_numeral(t)]
+    if no_roman:
+        candidates.append(join(no_roman))
+
+    no_digits_tokens = [t for t in cleaned if not t.isdigit()]
+    if no_digits_tokens:
+        candidates.append(join(no_digits_tokens))
+
+    stripped_digit_suffix = [re.sub(r"\d+$", "", t) for t in cleaned]
+    stripped_digit_suffix = [t for t in stripped_digit_suffix if t]
+    if stripped_digit_suffix:
+        candidates.append(join(stripped_digit_suffix))
+
+    if len(cleaned) >= 2:
+        candidates.append(join(cleaned[:-1]))
+
+    if len(tokens) >= 2:
+        candidates.append(join(tokens[:-1]))
+
+    if 2 <= len(cleaned) <= 5:
+        acronym = "".join(t[0] for t in cleaned if t and t[0].isalnum())
+        if acronym:
+            candidates.append(acronym)
+
+    uniq: List[str] = []
+    seen = set()
+    for c in candidates:
+        c = c.strip()
+        if not c:
+            continue
+        if len(c) < 3:
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        uniq.append(c)
+
+    return uniq
+
+
+async def resolve_topic_to_bases(topic: str) -> List[str]:
+    slugs = _candidate_slugs(topic)
+
+    bases: List[str] = []
+    seen = set()
+
+    for slug in slugs:
+        for base in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
+            base = normalize_base(base)
+            if base in seen:
+                continue
+            seen.add(base)
+            bases.append(base)
+
+    return bases
 
 def primary_action_api(base: str) -> str:
     host = urlparse(base).hostname or ""
@@ -190,24 +274,34 @@ def health() -> Dict[str, bool]:
 
 
 @app.get("/resolve")
-async def resolve(
-    topic: str = Query(..., min_length=1),
-) -> Dict[str, Any]:
-    """
-    Resolve a topic to a usable fandom or wiki gg base.
-    """
-    best, tried = await resolve_best_base(topic)
-    if not best:
-        raise HTTPException(
-            status_code=404,
-            detail="could not resolve topic to a working fandom or wiki gg wiki",
-        )
+async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
+    bases = await resolve_topic_to_bases(topic)
 
-    return {
-        "topic": topic,
-        "wiki": best,
-        "tried": tried,
-    }
+    for base in bases:
+        if not allowed_host(base):
+            continue
+        try:
+            await mediawiki_get(
+                primary_action_api(base),
+                {
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": topic,
+                    "srlimit": 1,
+                    "format": "json",
+                },
+            )
+            return {
+                "topic": topic,
+                "wiki": base,
+            }
+        except Exception:
+            continue
+
+    raise HTTPException(
+        status_code=404,
+        detail="could not resolve topic to a working fandom or wiki gg wiki",
+    )
 
 
 @app.get("/search")
