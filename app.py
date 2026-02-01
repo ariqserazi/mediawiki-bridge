@@ -18,7 +18,6 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30.0"))
 ALLOWED_WIKI_HOST_SUFFIXES = (
     "fandom.com",
     "wiki.gg",
-    "wikipedia.org",
 )
 
 TAG_RE = re.compile(r"<[^>]+>")
@@ -115,7 +114,6 @@ def default_wiki_chain(query: str) -> List[str]:
     return [
         f"https://{q}.fandom.com",
         f"https://{q}.wiki.gg",
-        "https://en.wikipedia.org",
     ]
 
 
