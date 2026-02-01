@@ -161,28 +161,33 @@ async def mediawiki_get(api_url: str, params: Dict[str, Any]) -> Dict[str, Any]:
     return r.json()
 
 
-async def probe_wiki_base(base: str) -> bool:
+async def probe_wiki_base(base: str, hint: str) -> bool:
+    """
+    Returns True if the base responds like a working MediaWiki action API.
+    Uses a minimal search query because it tends to work on Fandom and wiki gg
+    even when siteinfo is restricted.
+    """
     if not allowed_host(base):
         return False
 
     params = {
         "action": "query",
-        "meta": "siteinfo",
-        "siprop": "general",
+        "list": "search",
+        "srsearch": hint,
+        "srlimit": 1,
         "format": "json",
     }
 
     try:
         data = await mediawiki_get(primary_action_api(base), params)
-        general = data.get("query", {}).get("general", {})
-        return bool(general.get("sitename") or general.get("server"))
+        return "query" in data and "search" in (data.get("query") or {})
     except Exception:
         try:
             data = await mediawiki_get(fallback_action_api(base), params)
-            general = data.get("query", {}).get("general", {})
-            return bool(general.get("sitename") or general.get("server"))
+            return "query" in data and "search" in (data.get("query") or {})
         except Exception:
             return False
+
 
 
 async def resolve_best_base(topic: str) -> Tuple[Optional[str], List[Dict[str, Any]]]:
@@ -190,12 +195,13 @@ async def resolve_best_base(topic: str) -> Tuple[Optional[str], List[Dict[str, A
     tried: List[Dict[str, Any]] = []
 
     for base in bases:
-        ok = await probe_wiki_base(base)
+        ok = await probe_wiki_base(base, hint=topic)
         tried.append({"wiki": base, "ok": ok})
         if ok:
             return base, tried
 
     return None, tried
+
 
 
 async def try_wiki_chain(
@@ -225,7 +231,10 @@ def health() -> Dict[str, bool]:
 async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
     best, tried = await resolve_best_base(topic)
     if not best:
-        raise HTTPException(status_code=404, detail="could not resolve topic to fandom.com or wiki.gg")
+        raise HTTPException(
+            status_code=404,
+            detail="could not resolve topic to a working fandom or wiki gg wiki",
+        )
     return {"topic": topic, "wiki": best, "tried": tried}
 
 
