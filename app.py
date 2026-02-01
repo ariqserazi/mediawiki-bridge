@@ -9,10 +9,10 @@ from fastapi import FastAPI, HTTPException, Query
 
 app = FastAPI(
     title="MediaWiki Bridge API",
-    version="1.4.0",
+    version="1.4.1",
 )
 
-USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.4.0")
+USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.4.1")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30.0"))
 
 ALLOWED_WIKI_HOST_SUFFIXES = (
@@ -22,12 +22,17 @@ ALLOWED_WIKI_HOST_SUFFIXES = (
 
 TAG_RE = re.compile(r"<[^>]+>")
 
+STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
+ROMANS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+
 
 def normalize_base(url: str) -> str:
+    url = (url or "").strip()
     parsed = urlparse(url)
-    if not parsed.scheme or not parsed.hostname:
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
         raise HTTPException(status_code=400, detail="invalid wiki url")
-    return f"{parsed.scheme}://{parsed.hostname}"
+    return f"{parsed.scheme}://{host}"
 
 
 def allowed_host(base: str) -> bool:
@@ -35,47 +40,22 @@ def allowed_host(base: str) -> bool:
     return any(host.endswith(sfx) for sfx in ALLOWED_WIKI_HOST_SUFFIXES)
 
 
-def slugify_topic(topic: str) -> str:
-    s = topic.strip().lower()
-    if not s:
-        raise HTTPException(status_code=400, detail="topic is empty")
-
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-
-    tokens = s.split(" ")
-    cleaned: List[str] = []
-    for t in tokens:
-        if t in {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}:
-            continue
-        if not t:
-            continue
-        cleaned.append(t)
-
-    if not cleaned:
-        cleaned = tokens
-
-    return "".join(cleaned)
-
 def _tokenize_topic(topic: str) -> List[str]:
-    s = topic.strip().lower()
+    s = (topic or "").strip().lower()
     if not s:
         raise HTTPException(status_code=400, detail="topic is empty")
-
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return [t for t in s.split(" ") if t]
 
 
 def _is_roman_numeral(t: str) -> bool:
-    return t in {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+    return t in ROMANS
 
 
 def _candidate_slugs(topic: str) -> List[str]:
     tokens = _tokenize_topic(topic)
-
-    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
-    cleaned = [t for t in tokens if t not in stop]
+    cleaned = [t for t in tokens if t not in STOPWORDS]
 
     def join(ts: List[str]) -> str:
         return "".join(ts)
@@ -105,7 +85,7 @@ def _candidate_slugs(topic: str) -> List[str]:
     if len(tokens) >= 2:
         candidates.append(join(tokens[:-1]))
 
-    if 2 <= len(cleaned) <= 5:
+    if 2 <= len(cleaned) <= 6:
         acronym = "".join(t[0] for t in cleaned if t and t[0].isalnum())
         if acronym:
             candidates.append(acronym)
@@ -113,7 +93,7 @@ def _candidate_slugs(topic: str) -> List[str]:
     uniq: List[str] = []
     seen = set()
     for c in candidates:
-        c = c.strip()
+        c = (c or "").strip()
         if not c:
             continue
         if len(c) < 3:
@@ -133,8 +113,8 @@ async def resolve_topic_to_bases(topic: str) -> List[str]:
     seen = set()
 
     for slug in slugs:
-        for base in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
-            base = normalize_base(base)
+        for raw in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
+            base = normalize_base(raw)
             if base in seen:
                 continue
             seen.add(base)
@@ -142,15 +122,16 @@ async def resolve_topic_to_bases(topic: str) -> List[str]:
 
     return bases
 
+
 def primary_action_api(base: str) -> str:
-    host = urlparse(base).hostname or ""
+    host = (urlparse(base).hostname or "").lower()
     if host.endswith("fandom.com"):
         return f"{base}/api.php"
     return f"{base}/w/api.php"
 
 
 def fallback_action_api(base: str) -> str:
-    host = urlparse(base).hostname or ""
+    host = (urlparse(base).hostname or "").lower()
     if host.endswith("fandom.com"):
         return f"{base}/w/api.php"
     return f"{base}/api.php"
@@ -159,8 +140,7 @@ def fallback_action_api(base: str) -> str:
 def clean_snippet(value: Any) -> str:
     if not value:
         return ""
-    s = str(value)
-    s = html.unescape(s)
+    s = html.unescape(str(value))
     s = TAG_RE.sub("", s)
     return s.strip()
 
@@ -182,10 +162,6 @@ async def mediawiki_get(api_url: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def probe_wiki_base(base: str) -> bool:
-    """
-    Returns True if the base looks like a working MediaWiki site.
-    Uses siteinfo which is lightweight and consistent.
-    """
     if not allowed_host(base):
         return False
 
@@ -209,35 +185,7 @@ async def probe_wiki_base(base: str) -> bool:
             return False
 
 
-async def resolve_topic_to_bases(topic: str) -> List[str]:
-    """
-    Generates candidate bases and returns them in priority order.
-    Priority is fandom first, then wiki gg.
-    """
-    slug = slugify_topic(topic)
-
-    candidates = [
-        f"https://{slug}.fandom.com",
-        f"https://{slug}.wiki.gg",
-    ]
-
-    bases: List[str] = []
-    seen = set()
-
-    for c in candidates:
-        base = normalize_base(c)
-        if base in seen:
-            continue
-        seen.add(base)
-        bases.append(base)
-
-    return bases
-
-
 async def resolve_best_base(topic: str) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """
-    Returns best_base plus a report of what was tried.
-    """
     bases = await resolve_topic_to_bases(topic)
     tried: List[Dict[str, Any]] = []
 
@@ -275,33 +223,10 @@ def health() -> Dict[str, bool]:
 
 @app.get("/resolve")
 async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
-    bases = await resolve_topic_to_bases(topic)
-
-    for base in bases:
-        if not allowed_host(base):
-            continue
-        try:
-            await mediawiki_get(
-                primary_action_api(base),
-                {
-                    "action": "query",
-                    "list": "search",
-                    "srsearch": topic,
-                    "srlimit": 1,
-                    "format": "json",
-                },
-            )
-            return {
-                "topic": topic,
-                "wiki": base,
-            }
-        except Exception:
-            continue
-
-    raise HTTPException(
-        status_code=404,
-        detail="could not resolve topic to a working fandom or wiki gg wiki",
-    )
+    best, tried = await resolve_best_base(topic)
+    if not best:
+        raise HTTPException(status_code=404, detail="could not resolve topic to fandom.com or wiki.gg")
+    return {"topic": topic, "wiki": best, "tried": tried}
 
 
 @app.get("/search")
@@ -314,23 +239,30 @@ async def search(
         base = normalize_base(wiki)
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
-        bases = [base]
+        used_base, data = await try_wiki_chain(
+            [base],
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": q,
+                "srlimit": limit,
+                "format": "json",
+            },
+        )
     else:
-        best, tried = await resolve_best_base(q)
+        best, _tried = await resolve_best_base(q)
         if not best:
             raise HTTPException(status_code=404, detail="could not resolve wiki for search query")
-        bases = [best]
-
-    used_base, data = await try_wiki_chain(
-        bases,
-        {
-            "action": "query",
-            "list": "search",
-            "srsearch": q,
-            "srlimit": limit,
-            "format": "json",
-        },
-    )
+        used_base, data = await try_wiki_chain(
+            [best],
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": q,
+                "srlimit": limit,
+                "format": "json",
+            },
+        )
 
     items = data.get("query", {}).get("search", [])
     results: List[Dict[str, Any]] = []
@@ -353,12 +285,7 @@ async def search(
             }
         )
 
-    return {
-        "wiki": used_base,
-        "query": q,
-        "limit": limit,
-        "results": results,
-    }
+    return {"wiki": used_base, "query": q, "limit": limit, "results": results}
 
 
 @app.get("/page")
@@ -370,25 +297,34 @@ async def page(
         base = normalize_base(wiki)
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
-        bases = [base]
+        used_base, data = await try_wiki_chain(
+            [base],
+            {
+                "action": "query",
+                "prop": "extracts|info",
+                "exintro": "1",
+                "explaintext": "1",
+                "inprop": "url",
+                "titles": title,
+                "format": "json",
+            },
+        )
     else:
-        best, tried = await resolve_best_base(title)
+        best, _tried = await resolve_best_base(title)
         if not best:
             raise HTTPException(status_code=404, detail="could not resolve wiki for page title")
-        bases = [best]
-
-    used_base, data = await try_wiki_chain(
-        bases,
-        {
-            "action": "query",
-            "prop": "extracts|info",
-            "exintro": "1",
-            "explaintext": "1",
-            "inprop": "url",
-            "titles": title,
-            "format": "json",
-        },
-    )
+        used_base, data = await try_wiki_chain(
+            [best],
+            {
+                "action": "query",
+                "prop": "extracts|info",
+                "exintro": "1",
+                "explaintext": "1",
+                "inprop": "url",
+                "titles": title,
+                "format": "json",
+            },
+        )
 
     pages = data.get("query", {}).get("pages", {})
     if not pages:
