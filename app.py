@@ -9,132 +9,33 @@ from fastapi import FastAPI, HTTPException, Query
 
 app = FastAPI(
     title="MediaWiki Bridge API",
-    version="1.4.1",
+    version="1.5.0",
 )
 
-USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.4.1")
+USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.5.0")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30.0"))
 
-ALLOWED_WIKI_HOST_SUFFIXES = (
-    "fandom.com",
-    "wiki.gg",
-)
+ALLOWED_WIKI_HOST_SUFFIXES = ("fandom.com", "wiki.gg")
 
 TAG_RE = re.compile(r"<[^>]+>")
-
 STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
 ROMANS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
 
 
+# -------------------------
+# Utilities
+# -------------------------
+
 def normalize_base(url: str) -> str:
-    url = (url or "").strip()
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme not in ("http", "https") or not host:
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise HTTPException(status_code=400, detail="invalid wiki url")
-    return f"{parsed.scheme}://{host}"
+    return f"{parsed.scheme}://{parsed.hostname.lower()}"
 
 
 def allowed_host(base: str) -> bool:
     host = (urlparse(base).hostname or "").lower()
     return any(host.endswith(sfx) for sfx in ALLOWED_WIKI_HOST_SUFFIXES)
-
-
-def _tokenize_topic(topic: str) -> List[str]:
-    s = (topic or "").strip().lower()
-    if not s:
-        raise HTTPException(status_code=400, detail="topic is empty")
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return [t for t in s.split(" ") if t]
-
-
-def _is_roman_numeral(t: str) -> bool:
-    return t in ROMANS
-
-
-def _candidate_slugs(topic: str) -> List[str]:
-    tokens = _tokenize_topic(topic)
-    cleaned = [t for t in tokens if t not in STOPWORDS]
-
-    def join(ts: List[str]) -> str:
-        return "".join(ts)
-
-    candidates: List[str] = []
-
-    if cleaned:
-        candidates.append(join(cleaned))
-    candidates.append(join(tokens))
-
-    no_roman = [t for t in cleaned if not _is_roman_numeral(t)]
-    if no_roman:
-        candidates.append(join(no_roman))
-
-    no_digits_tokens = [t for t in cleaned if not t.isdigit()]
-    if no_digits_tokens:
-        candidates.append(join(no_digits_tokens))
-
-    stripped_digit_suffix = [re.sub(r"\d+$", "", t) for t in cleaned]
-    stripped_digit_suffix = [t for t in stripped_digit_suffix if t]
-    if stripped_digit_suffix:
-        candidates.append(join(stripped_digit_suffix))
-
-    if len(cleaned) >= 2:
-        candidates.append(join(cleaned[:-1]))
-
-    if len(tokens) >= 2:
-        candidates.append(join(tokens[:-1]))
-
-    if 2 <= len(cleaned) <= 6:
-        acronym = "".join(t[0] for t in cleaned if t and t[0].isalnum())
-        if acronym:
-            candidates.append(acronym)
-
-    uniq: List[str] = []
-    seen = set()
-    for c in candidates:
-        c = (c or "").strip()
-        if not c:
-            continue
-        if len(c) < 3:
-            continue
-        if c in seen:
-            continue
-        seen.add(c)
-        uniq.append(c)
-
-    return uniq
-
-
-async def resolve_topic_to_bases(topic: str) -> List[str]:
-    slugs = _candidate_slugs(topic)
-
-    bases: List[str] = []
-    seen = set()
-
-    for slug in slugs:
-        for raw in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
-            base = normalize_base(raw)
-            if base in seen:
-                continue
-            seen.add(base)
-            bases.append(base)
-
-    return bases
-
-
-def primary_action_api(base: str) -> str:
-    host = (urlparse(base).hostname or "").lower()
-    if host.endswith("fandom.com"):
-        return f"{base}/api.php"
-    return f"{base}/w/api.php"
-
-
-def fallback_action_api(base: str) -> str:
-    host = (urlparse(base).hostname or "").lower()
-    if host.endswith("fandom.com"):
-        return f"{base}/w/api.php"
-    return f"{base}/api.php"
 
 
 def clean_snippet(value: Any) -> str:
@@ -146,342 +47,143 @@ def clean_snippet(value: Any) -> str:
 
 
 def page_url(base: str, title: str) -> str:
-    safe = quote(title.replace(" ", "_"))
-    return f"{base}/wiki/{safe}"
+    return f"{base}/wiki/{quote(title.replace(' ', '_'))}"
 
 
-async def mediawiki_get(api_url: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    headers = {"User-Agent": USER_AGENT}
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
-        r = await client.get(api_url, params=params)
+# -------------------------
+# Topic Resolution
+# -------------------------
 
+def tokenize_topic(topic: str) -> List[str]:
+    s = topic.lower().strip()
+    s = re.sub(r"[^\w\s]", " ", s)
+    return [t for t in s.split() if t and t not in STOPWORDS]
+
+
+def candidate_slugs(topic: str) -> List[str]:
+    tokens = tokenize_topic(topic)
+    variants = [
+        "".join(tokens),
+        "".join(t for t in tokens if t not in ROMANS),
+        "".join(tokens[:-1]) if len(tokens) > 1 else "",
+    ]
+    return [v for v in dict.fromkeys(variants) if len(v) >= 3]
+
+
+async def resolve_topic(topic: str) -> str:
+    slugs = candidate_slugs(topic)
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}) as client:
+        for slug in slugs:
+            for base in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
+                try:
+                    api = f"{base}/api.php" if base.endswith("fandom.com") else f"{base}/w/api.php"
+                    r = await client.get(api, params={
+                        "action": "query",
+                        "list": "search",
+                        "srsearch": topic,
+                        "srlimit": 1,
+                        "format": "json",
+                    })
+                    if r.status_code == 200 and "query" in r.json():
+                        return normalize_base(base)
+                except Exception:
+                    continue
+
+    raise HTTPException(status_code=404, detail="could not resolve topic")
+
+
+# -------------------------
+# MediaWiki fetch
+# -------------------------
+
+async def mediawiki_get(api: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}) as client:
+        r = await client.get(api, params=params)
     if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"upstream mediawiki error {r.status_code}")
-
+        raise HTTPException(status_code=502, detail="upstream mediawiki error")
     return r.json()
 
 
-async def probe_wiki_base(base: str, hint: str) -> bool:
-    """
-    Returns True if the base responds like a working MediaWiki action API.
-    Uses a minimal search query because it tends to work on Fandom and wiki gg
-    even when siteinfo is restricted.
-    """
-    if not allowed_host(base):
-        return False
-
-    params = {
-        "action": "query",
-        "list": "search",
-        "srsearch": hint,
-        "srlimit": 1,
-        "format": "json",
-    }
-
-    try:
-        data = await mediawiki_get(primary_action_api(base), params)
-        return "query" in data and "search" in (data.get("query") or {})
-    except Exception:
-        try:
-            data = await mediawiki_get(fallback_action_api(base), params)
-            return "query" in data and "search" in (data.get("query") or {})
-        except Exception:
-            return False
+def action_api(base: str) -> str:
+    return f"{base}/api.php" if base.endswith("fandom.com") else f"{base}/w/api.php"
 
 
-
-async def resolve_best_base(topic: str) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    bases = await resolve_topic_to_bases(topic)
-    tried: List[Dict[str, Any]] = []
-
-    for base in bases:
-        ok = await probe_wiki_base(base, hint=topic)
-        tried.append({"wiki": base, "ok": ok})
-        if ok:
-            return base, tried
-
-    return None, tried
-
-
-
-async def try_wiki_chain(
-    bases: List[str],
-    params: Dict[str, Any],
-) -> Tuple[str, Dict[str, Any]]:
-    for base in bases:
-        try:
-            data = await mediawiki_get(primary_action_api(base), params)
-            return base, data
-        except Exception:
-            try:
-                data = await mediawiki_get(fallback_action_api(base), params)
-                return base, data
-            except Exception:
-                continue
-
-    raise HTTPException(status_code=502, detail="all wiki sources failed")
-
+# -------------------------
+# Routes
+# -------------------------
 
 @app.get("/health")
-def health() -> Dict[str, bool]:
+def health():
     return {"ok": True}
 
 
 @app.get("/resolve")
-async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
-    best, tried = await resolve_best_base(topic)
-    if not best:
-        raise HTTPException(
-            status_code=404,
-            detail="could not resolve topic to a working fandom or wiki gg wiki",
-        )
-    return {"topic": topic, "wiki": best, "tried": tried}
+async def resolve(topic: str = Query(..., min_length=1)):
+    wiki = await resolve_topic(topic)
+    return {"topic": topic, "wiki": wiki}
 
 
 @app.get("/search")
 async def search(
+    topic: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
-    topic: Optional[str] = Query(None, min_length=1),
     limit: int = Query(5, ge=1, le=20),
-    wiki: Optional[str] = Query(None),
-) -> Dict[str, Any]:
-    if wiki:
-        base = normalize_base(wiki)
-        if not allowed_host(base):
-            raise HTTPException(status_code=403, detail="wiki host not allowed")
-        used_base, data = await try_wiki_chain(
-            [base],
-            {
-                "action": "query",
-                "list": "search",
-                "srsearch": q,
-                "srlimit": limit,
-                "format": "json",
-            },
-        )
-    else:
-        if not topic:
-            raise HTTPException(status_code=400, detail="topic is required when wiki is not provided")
+):
+    base = await resolve_topic(topic)
+    data = await mediawiki_get(action_api(base), {
+        "action": "query",
+        "list": "search",
+        "srsearch": q,
+        "srlimit": limit,
+        "format": "json",
+    })
 
-        best, _tried = await resolve_best_base(topic)
-        if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for topic")
-
-        used_base, data = await try_wiki_chain(
-            [best],
-            {
-                "action": "query",
-                "list": "search",
-                "srsearch": q,
-                "srlimit": limit,
-                "format": "json",
-            },
-        )
-
-    items = data.get("query", {}).get("search", [])
-    results: List[Dict[str, Any]] = []
-
-    for item in items:
-        title_val = item.get("title")
-        if not title_val:
-            continue
-        title_str = str(title_val).strip()
-        if not title_str:
-            continue
-
-        results.append(
-            {
-                "title": title_str,
-                "pageid": item.get("pageid"),
-                "url": page_url(used_base, title_str),
-                "snippet": clean_snippet(item.get("snippet")),
-                "timestamp": item.get("timestamp"),
-            }
-        )
-
-    return {"topic": topic or "", "wiki": used_base, "query": q, "limit": limit, "results": results}
-
-
-@app.get("/page")
-async def page(
-    title: str = Query(..., min_length=1),
-    topic: Optional[str] = Query(None, min_length=1),
-    wiki: Optional[str] = Query(None),
-) -> Dict[str, Any]:
-    if wiki:
-        base = normalize_base(wiki)
-        if not allowed_host(base):
-            raise HTTPException(status_code=403, detail="wiki host not allowed")
-        used_base, data = await try_wiki_chain(
-            [base],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
-    else:
-        if not topic:
-            raise HTTPException(status_code=400, detail="topic is required when wiki is not provided")
-
-        best, _tried = await resolve_best_base(topic)
-        if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for topic")
-
-        used_base, data = await try_wiki_chain(
-            [best],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
-
-    pages = data.get("query", {}).get("pages", {})
-    if not pages:
-        raise HTTPException(status_code=404, detail="page not found")
-
-    page_obj = next(iter(pages.values()))
-    if "missing" in page_obj:
-        raise HTTPException(status_code=404, detail="page not found")
-
-    resolved_title = page_obj.get("title") or title
+    results = []
+    for item in data.get("query", {}).get("search", []):
+        results.append({
+            "title": item["title"],
+            "pageid": item.get("pageid"),
+            "url": page_url(base, item["title"]),
+            "snippet": clean_snippet(item.get("snippet")),
+            "timestamp": item.get("timestamp"),
+        })
 
     return {
-        "topic": topic or "",
-        "wiki": used_base,
-        "title": resolved_title,
-        "pageid": page_obj.get("pageid"),
-        "url": page_obj.get("fullurl") or page_url(used_base, str(resolved_title)),
-        "extract": page_obj.get("extract"),
+        "topic": topic,
+        "wiki": base,
+        "query": q,
+        "results": results,
     }
 
 
-
 @app.get("/page")
 async def page(
+    topic: str = Query(..., min_length=1),
     title: str = Query(..., min_length=1),
-    topic: Optional[str] = Query(None, min_length=1),
-    wiki: Optional[str] = Query(None),
-) -> Dict[str, Any]:
-    if wiki:
-        base = normalize_base(wiki)
-        if not allowed_host(base):
-            raise HTTPException(status_code=403, detail="wiki host not allowed")
-        used_base, data = await try_wiki_chain(
-            [base],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
-    else:
-        if not topic:
-            raise HTTPException(status_code=400, detail="topic is required when wiki is not provided")
-
-        best, _tried = await resolve_best_base(topic)
-        if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for topic")
-
-        used_base, data = await try_wiki_chain(
-            [best],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
+):
+    base = await resolve_topic(topic)
+    data = await mediawiki_get(action_api(base), {
+        "action": "query",
+        "prop": "extracts|info",
+        "exintro": "1",
+        "explaintext": "1",
+        "inprop": "url",
+        "titles": title,
+        "format": "json",
+    })
 
     pages = data.get("query", {}).get("pages", {})
-    if not pages:
-        raise HTTPException(status_code=404, detail="page not found")
+    page_obj = next(iter(pages.values()), None)
 
-    page_obj = next(iter(pages.values()))
-    if "missing" in page_obj:
+    if not page_obj or "missing" in page_obj:
         raise HTTPException(status_code=404, detail="page not found")
-
-    resolved_title = page_obj.get("title") or title
 
     return {
-        "topic": topic or "",
-        "wiki": used_base,
-        "title": resolved_title,
+        "topic": topic,
+        "wiki": base,
+        "title": page_obj["title"],
         "pageid": page_obj.get("pageid"),
-        "url": page_obj.get("fullurl") or page_url(used_base, str(resolved_title)),
-        "extract": page_obj.get("extract"),
-    }
-
-
-
-@app.get("/page")
-async def page(
-    title: str = Query(..., min_length=1),
-    wiki: Optional[str] = Query(None),
-) -> Dict[str, Any]:
-    if wiki:
-        base = normalize_base(wiki)
-        if not allowed_host(base):
-            raise HTTPException(status_code=403, detail="wiki host not allowed")
-        used_base, data = await try_wiki_chain(
-            [base],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
-    else:
-        best, _tried = await resolve_best_base(title)
-        if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for page title")
-        used_base, data = await try_wiki_chain(
-            [best],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
-
-    pages = data.get("query", {}).get("pages", {})
-    if not pages:
-        raise HTTPException(status_code=404, detail="page not found")
-
-    page_obj = next(iter(pages.values()))
-    if "missing" in page_obj:
-        raise HTTPException(status_code=404, detail="page not found")
-
-    resolved_title = page_obj.get("title") or title
-
-    return {
-        "wiki": used_base,
-        "title": resolved_title,
-        "pageid": page_obj.get("pageid"),
-        "url": page_obj.get("fullurl") or page_url(used_base, str(resolved_title)),
+        "url": page_obj.get("fullurl") or page_url(base, page_obj["title"]),
         "extract": page_obj.get("extract"),
     }
