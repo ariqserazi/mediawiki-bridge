@@ -54,7 +54,7 @@ def first_good_paragraph(parse_html: str) -> str:
             return candidate
     return ""
 
-def best_paragraphs(parse_html: str, max_paras: int = 80, min_len: int = 60, max_chars: int = 40000) -> str:
+def best_paragraphs(parse_html: str, max_paras: int = 120, min_len: int = 60, max_chars: int = 90000) -> str:
     if not parse_html:
         return ""
 
@@ -125,7 +125,7 @@ async def fetch_extract_with_parse(base: str, title: str) -> str:
     if not parse_html:
         return ""
 
-    return best_paragraphs(str(parse_html), max_paras=80, max_chars=40000)
+    return best_paragraphs(str(parse_html), max_paras=120, max_chars=90000)
 
 def normalize_base(url: str) -> str:
     parsed = urlparse((url or "").strip())
