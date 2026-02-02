@@ -62,78 +62,12 @@ def tokenize_topic(topic: str) -> List[str]:
 
 def candidate_slugs(topic: str) -> List[str]:
     tokens = tokenize_topic(topic)
-    cleaned = [t for t in tokens if t not in STOPWORDS]
-
-    def join_compact(ts: List[str]) -> str:
-        return "".join(ts)
-
-    def join_hyphen(ts: List[str]) -> str:
-        return "-".join(ts)
-
-    candidates: List[str] = []
-
-    # Full forms
-    if cleaned:
-        candidates.append(join_compact(cleaned))
-        candidates.append(join_hyphen(cleaned))
-
-    candidates.append(join_compact(tokens))
-    candidates.append(join_hyphen(tokens))
-
-    # First two tokens often match fandom subdomains like clair-obscur
-    if len(cleaned) >= 2:
-        candidates.append(join_compact(cleaned[:2]))
-        candidates.append(join_hyphen(cleaned[:2]))
-    if len(tokens) >= 2:
-        candidates.append(join_compact(tokens[:2]))
-        candidates.append(join_hyphen(tokens[:2]))
-
-    # Remove roman numerals
-    no_roman = [t for t in cleaned if not _is_roman_numeral(t)]
-    if no_roman:
-        candidates.append(join_compact(no_roman))
-        candidates.append(join_hyphen(no_roman))
-
-    # Remove pure digits
-    no_digits = [t for t in cleaned if not t.isdigit()]
-    if no_digits:
-        candidates.append(join_compact(no_digits))
-        candidates.append(join_hyphen(no_digits))
-
-    # Strip digit suffixes like "33"
-    stripped_digit_suffix = [re.sub(r"\d+$", "", t) for t in cleaned]
-    stripped_digit_suffix = [t for t in stripped_digit_suffix if t]
-    if stripped_digit_suffix:
-        candidates.append(join_compact(stripped_digit_suffix))
-        candidates.append(join_hyphen(stripped_digit_suffix))
-
-    # Progressive truncation of cleaned tokens
-    for n in range(len(cleaned) - 1, 0, -1):
-        candidates.append(join_compact(cleaned[:n]))
-        candidates.append(join_hyphen(cleaned[:n]))
-
-    # Acronym
-    if 2 <= len(cleaned) <= 6:
-        acronym = "".join(t[0] for t in cleaned if t and t[0].isalnum())
-        if acronym:
-            candidates.append(acronym)
-
-    # Deduplicate, keep only reasonable length
-    uniq: List[str] = []
-    seen = set()
-    for c in candidates:
-        c = (c or "").strip().lower()
-        if not c:
-            continue
-        if len(c) < 3:
-            continue
-        if c in seen:
-            continue
-        seen.add(c)
-        uniq.append(c)
-
-    return uniq
-
+    variants = [
+        "".join(tokens),
+        "".join(t for t in tokens if t not in ROMANS),
+        "".join(tokens[:-1]) if len(tokens) > 1 else "",
+    ]
+    return [v for v in dict.fromkeys(variants) if len(v) >= 3]
 
 
 async def resolve_topic(topic: str) -> str:
