@@ -54,7 +54,35 @@ def first_good_paragraph(parse_html: str) -> str:
             return candidate
     return ""
 
+def best_paragraphs(parse_html: str, max_paras: int = 3, min_len: int = 60, max_chars: int = 900) -> str:
+    if not parse_html:
+        return ""
 
+    s = COMMENT_RE.sub(" ", parse_html)
+    s = SCRIPT_STYLE_RE.sub(" ", s)
+    s = TABLE_RE.sub(" ", s)
+
+    paras: List[str] = []
+    total = 0
+
+    for m in PARA_RE.finditer(s):
+        text = strip_html_to_text(m.group(1))
+        if len(text) < min_len:
+            continue
+
+        if text.lower().startswith("this article") or text.lower().startswith("this page"):
+            continue
+
+        if total + len(text) > max_chars and paras:
+            break
+
+        paras.append(text)
+        total += len(text)
+
+        if len(paras) >= max_paras:
+            break
+
+    return "\n\n".join(paras).strip()
 async def fetch_extract_with_query(base: str, title: str, intro_only: bool) -> str:
     params: Dict[str, Any] = {
         "action": "query",
@@ -97,7 +125,7 @@ async def fetch_extract_with_parse(base: str, title: str) -> str:
     if not parse_html:
         return ""
 
-    return first_good_paragraph(str(parse_html))
+    return best_paragraphs(str(parse_html), max_paras=3, max_chars=900)
 
 def normalize_base(url: str) -> str:
     parsed = urlparse((url or "").strip())
@@ -401,7 +429,7 @@ async def page(
     if not extract_text:
         extract_text = await fetch_extract_with_parse(base, str(resolved_title))
         if extract_text:
-            extract_source = "parse_first_paragraph"
+            extract_source = "parse_lead_paragraphs"
 
     return {
         "topic": topic,
