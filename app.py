@@ -54,7 +54,7 @@ def first_good_paragraph(parse_html: str) -> str:
             return candidate
     return ""
 
-def best_paragraphs(parse_html: str, max_paras: int = 3, min_len: int = 60, max_chars: int = 900) -> str:
+def best_paragraphs(parse_html: str, max_paras: int = 8, min_len: int = 60, max_chars: int = 3000) -> str:
     if not parse_html:
         return ""
 
