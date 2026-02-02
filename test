@@ -305,8 +305,8 @@ async def page(
         {
             "action": "query",
             "prop": "extracts|info",
-            "exintro": "1",
             "explaintext": "1",
+            "exchars": 4000,
             "inprop": "url",
             "titles": title,
             "format": "json",
