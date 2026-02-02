@@ -242,113 +242,90 @@ async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
 async def search(
     q: str = Query(..., min_length=1),
     limit: int = Query(5, ge=1, le=20),
-    wiki: Optional[str] = Query(None),
+    topic: Optional[str] = Query(None, min_length=1),
+    wiki: Optional[str] = Query(None, min_length=1),
 ) -> Dict[str, Any]:
     if wiki:
         base = normalize_base(wiki)
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
-        used_base, data = await try_wiki_chain(
-            [base],
-            {
-                "action": "query",
-                "list": "search",
-                "srsearch": q,
-                "srlimit": limit,
-                "format": "json",
-            },
-        )
     else:
-        best, _tried = await resolve_best_base(q)
-        if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for search query")
-        used_base, data = await try_wiki_chain(
-            [best],
-            {
-                "action": "query",
-                "list": "search",
-                "srsearch": q,
-                "srlimit": limit,
-                "format": "json",
-            },
-        )
+        # Backward compatible behavior
+        # If topic is missing, treat q as the topic for resolution
+        base = await resolve_topic(topic or q)
 
-    items = data.get("query", {}).get("search", [])
-    results: List[Dict[str, Any]] = []
+    data = await mediawiki_get(action_api(base), {
+        "action": "query",
+        "list": "search",
+        "srsearch": q,
+        "srlimit": limit,
+        "format": "json",
+    })
 
-    for item in items:
-        title = item.get("title")
-        if not title:
+    results = []
+    for item in data.get("query", {}).get("search", []):
+        title_val = item.get("title")
+        if not title_val:
             continue
-        title_str = str(title).strip()
+        title_str = str(title_val).strip()
         if not title_str:
             continue
 
-        results.append(
-            {
-                "title": title_str,
-                "pageid": item.get("pageid"),
-                "url": page_url(used_base, title_str),
-                "snippet": clean_snippet(item.get("snippet")),
-                "timestamp": item.get("timestamp"),
-            }
-        )
+        results.append({
+            "title": title_str,
+            "pageid": item.get("pageid"),
+            "url": page_url(base, title_str),
+            "snippet": clean_snippet(item.get("snippet")),
+            "timestamp": item.get("timestamp"),
+        })
 
-    return {"wiki": used_base, "query": q, "limit": limit, "results": results}
+    return {
+        "topic": topic or "",
+        "wiki": base,
+        "query": q,
+        "limit": limit,
+        "results": results,
+    }
 
 
 @app.get("/page")
 async def page(
     title: str = Query(..., min_length=1),
-    wiki: Optional[str] = Query(None),
+    topic: Optional[str] = Query(None, min_length=1),
+    wiki: Optional[str] = Query(None, min_length=1),
 ) -> Dict[str, Any]:
     if wiki:
         base = normalize_base(wiki)
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
-        used_base, data = await try_wiki_chain(
-            [base],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
     else:
-        best, _tried = await resolve_best_base(title)
-        if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for page title")
-        used_base, data = await try_wiki_chain(
-            [best],
-            {
-                "action": "query",
-                "prop": "extracts|info",
-                "exintro": "1",
-                "explaintext": "1",
-                "inprop": "url",
-                "titles": title,
-                "format": "json",
-            },
-        )
+        # Backward compatible behavior
+        # If topic is missing, resolve from title
+        base = await resolve_topic(topic or title)
+
+    data = await mediawiki_get(action_api(base), {
+        "action": "query",
+        "prop": "extracts|info",
+        "exintro": "1",
+        "explaintext": "1",
+        "inprop": "url",
+        "titles": title,
+        "format": "json",
+    })
 
     pages = data.get("query", {}).get("pages", {})
-    if not pages:
-        raise HTTPException(status_code=404, detail="page not found")
+    page_obj = next(iter(pages.values()), None)
 
-    page_obj = next(iter(pages.values()))
-    if "missing" in page_obj:
+    if not page_obj or "missing" in page_obj:
         raise HTTPException(status_code=404, detail="page not found")
 
     resolved_title = page_obj.get("title") or title
 
     return {
-        "wiki": used_base,
+        "topic": topic or "",
+        "wiki": base,
         "title": resolved_title,
         "pageid": page_obj.get("pageid"),
-        "url": page_obj.get("fullurl") or page_url(used_base, str(resolved_title)),
+        "url": page_obj.get("fullurl") or page_url(base, str(resolved_title)),
         "extract": page_obj.get("extract"),
     }
