@@ -398,7 +398,6 @@ async def page(
         {
             "action": "query",
             "prop": "extracts|info",
-            "exintro": "1",
             "explaintext": "1",
             "inprop": "url",
             "titles": title,
@@ -419,12 +418,12 @@ async def page(
     extract_val = page_obj.get("extract")
     extract_text = (str(extract_val).strip() if extract_val else "")
 
-    extract_source = "query_extracts_intro"
+    extract_source = "query_extracts_full"
 
-    if not extract_text:
-        extract_text = await fetch_extract_with_query(base, str(resolved_title), intro_only=False)
-        if extract_text:
-            extract_source = "query_extracts_full"
+    # if not extract_text:
+    #     extract_text = await fetch_extract_with_query(base, str(resolved_title), intro_only=False)
+    #     if extract_text:
+    #         extract_source = "query_extracts_full"
 
     if not extract_text:
         extract_text = await fetch_extract_with_parse(base, str(resolved_title))
