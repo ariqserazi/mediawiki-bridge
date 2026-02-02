@@ -20,84 +20,11 @@ ALLOWED_WIKI_HOST_SUFFIXES = ("fandom.com", "wiki.gg")
 TAG_RE = re.compile(r"<[^>]+>")
 STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
 ROMANS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
-PARA_RE = re.compile(r"<p\b[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
-SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
-TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
-COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 # -------------------------
 # URL helpers
 # -------------------------
-def strip_html_to_text(raw_html: str) -> str:
-    if not raw_html:
-        return ""
-    s = raw_html
-    s = COMMENT_RE.sub(" ", s)
-    s = SCRIPT_STYLE_RE.sub(" ", s)
-    s = TABLE_RE.sub(" ", s)
-    s = html.unescape(s)
-    s = TAG_RE.sub(" ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def first_good_paragraph(parse_html: str) -> str:
-    if not parse_html:
-        return ""
-    s = COMMENT_RE.sub(" ", parse_html)
-    s = SCRIPT_STYLE_RE.sub(" ", s)
-    s = TABLE_RE.sub(" ", s)
-
-    for m in PARA_RE.finditer(s):
-        candidate = strip_html_to_text(m.group(1))
-        if len(candidate) >= 60:
-            return candidate
-    return ""
-
-
-async def fetch_extract_with_query(base: str, title: str, intro_only: bool) -> str:
-    params: Dict[str, Any] = {
-        "action": "query",
-        "prop": "extracts",
-        "explaintext": "1",
-        "titles": title,
-        "redirects": "1",
-        "format": "json",
-    }
-    if intro_only:
-        params["exintro"] = "1"
-
-    data = await mediawiki_get(base, params)
-    pages = data.get("query", {}).get("pages", {})
-    page_obj = next(iter(pages.values()), None)
-    if not page_obj or "missing" in page_obj:
-        return ""
-
-    extract_val = page_obj.get("extract")
-    if not extract_val:
-        return ""
-    s = str(extract_val).strip()
-    return s
-
-
-async def fetch_extract_with_parse(base: str, title: str) -> str:
-    data = await mediawiki_get(
-        base,
-        {
-            "action": "parse",
-            "page": title,
-            "prop": "text",
-            "redirects": "1",
-            "format": "json",
-        },
-    )
-
-    text_obj = (data.get("parse") or {}).get("text") or {}
-    parse_html = text_obj.get("*") or ""
-    if not parse_html:
-        return ""
-
-    return first_good_paragraph(str(parse_html))
 
 def normalize_base(url: str) -> str:
     parsed = urlparse((url or "").strip())
@@ -374,7 +301,6 @@ async def page(
             "explaintext": "1",
             "inprop": "url",
             "titles": title,
-            "redirects": "1",
             "format": "json",
         },
     )
@@ -386,29 +312,12 @@ async def page(
         raise HTTPException(status_code=404, detail="page not found")
 
     resolved_title = page_obj.get("title") or title
-    full_url = page_obj.get("fullurl") or page_url(base, str(resolved_title))
-
-    extract_val = page_obj.get("extract")
-    extract_text = (str(extract_val).strip() if extract_val else "")
-
-    extract_source = "query_extracts_intro"
-
-    if not extract_text:
-        extract_text = await fetch_extract_with_query(base, str(resolved_title), intro_only=False)
-        if extract_text:
-            extract_source = "query_extracts_full"
-
-    if not extract_text:
-        extract_text = await fetch_extract_with_parse(base, str(resolved_title))
-        if extract_text:
-            extract_source = "parse_first_paragraph"
 
     return {
         "topic": topic,
         "wiki": base,
         "title": resolved_title,
         "pageid": page_obj.get("pageid"),
-        "url": full_url,
-        "extract": extract_text or None,
-        "extract_source": extract_source if extract_text else None,
+        "url": page_obj.get("fullurl") or page_url(base, str(resolved_title)),
+        "extract": page_obj.get("extract"),
     }
