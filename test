@@ -9,10 +9,10 @@ from fastapi import FastAPI, HTTPException, Query
 
 app = FastAPI(
     title="MediaWiki Bridge API",
-    version="1.4.1",
+    version="1.4.2",
 )
 
-USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.4.1")
+USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.4.2")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30.0"))
 
 ALLOWED_WIKI_HOST_SUFFIXES = (
@@ -162,11 +162,6 @@ async def mediawiki_get(api_url: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def probe_wiki_base(base: str, hint: str) -> bool:
-    """
-    Returns True if the base responds like a working MediaWiki action API.
-    Uses a minimal search query because it tends to work on Fandom and wiki gg
-    even when siteinfo is restricted.
-    """
     if not allowed_host(base):
         return False
 
@@ -189,7 +184,6 @@ async def probe_wiki_base(base: str, hint: str) -> bool:
             return False
 
 
-
 async def resolve_best_base(topic: str) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     bases = await resolve_topic_to_bases(topic)
     tried: List[Dict[str, Any]] = []
@@ -201,7 +195,6 @@ async def resolve_best_base(topic: str) -> Tuple[Optional[str], List[Dict[str, A
             return base, tried
 
     return None, tried
-
 
 
 async def try_wiki_chain(
@@ -231,10 +224,7 @@ def health() -> Dict[str, bool]:
 async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
     best, tried = await resolve_best_base(topic)
     if not best:
-        raise HTTPException(
-            status_code=404,
-            detail="could not resolve topic to a working fandom or wiki gg wiki",
-        )
+        raise HTTPException(status_code=404, detail="could not resolve topic to fandom.com or wiki.gg")
     return {"topic": topic, "wiki": best, "tried": tried}
 
 
@@ -250,19 +240,23 @@ async def search(
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
     else:
-        # Backward compatible behavior
-        # If topic is missing, treat q as the topic for resolution
-        base = await resolve_topic(topic or q)
+        resolution_key = topic or q
+        base, _tried = await resolve_best_base(resolution_key)
+        if not base:
+            raise HTTPException(status_code=404, detail="could not resolve wiki for search")
 
-    data = await mediawiki_get(action_api(base), {
-        "action": "query",
-        "list": "search",
-        "srsearch": q,
-        "srlimit": limit,
-        "format": "json",
-    })
+    used_base, data = await try_wiki_chain(
+        [base],
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": q,
+            "srlimit": limit,
+            "format": "json",
+        },
+    )
 
-    results = []
+    results: List[Dict[str, Any]] = []
     for item in data.get("query", {}).get("search", []):
         title_val = item.get("title")
         if not title_val:
@@ -271,17 +265,19 @@ async def search(
         if not title_str:
             continue
 
-        results.append({
-            "title": title_str,
-            "pageid": item.get("pageid"),
-            "url": page_url(base, title_str),
-            "snippet": clean_snippet(item.get("snippet")),
-            "timestamp": item.get("timestamp"),
-        })
+        results.append(
+            {
+                "title": title_str,
+                "pageid": item.get("pageid"),
+                "url": page_url(used_base, title_str),
+                "snippet": clean_snippet(item.get("snippet")),
+                "timestamp": item.get("timestamp"),
+            }
+        )
 
     return {
         "topic": topic or "",
-        "wiki": base,
+        "wiki": used_base,
         "query": q,
         "limit": limit,
         "results": results,
@@ -299,19 +295,23 @@ async def page(
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
     else:
-        # Backward compatible behavior
-        # If topic is missing, resolve from title
-        base = await resolve_topic(topic or title)
+        resolution_key = topic or title
+        base, _tried = await resolve_best_base(resolution_key)
+        if not base:
+            raise HTTPException(status_code=404, detail="could not resolve wiki for page")
 
-    data = await mediawiki_get(action_api(base), {
-        "action": "query",
-        "prop": "extracts|info",
-        "exintro": "1",
-        "explaintext": "1",
-        "inprop": "url",
-        "titles": title,
-        "format": "json",
-    })
+    used_base, data = await try_wiki_chain(
+        [base],
+        {
+            "action": "query",
+            "prop": "extracts|info",
+            "exintro": "1",
+            "explaintext": "1",
+            "inprop": "url",
+            "titles": title,
+            "format": "json",
+        },
+    )
 
     pages = data.get("query", {}).get("pages", {})
     page_obj = next(iter(pages.values()), None)
@@ -323,9 +323,9 @@ async def page(
 
     return {
         "topic": topic or "",
-        "wiki": base,
+        "wiki": used_base,
         "title": resolved_title,
         "pageid": page_obj.get("pageid"),
-        "url": page_obj.get("fullurl") or page_url(base, str(resolved_title)),
+        "url": page_obj.get("fullurl") or page_url(used_base, str(resolved_title)),
         "extract": page_obj.get("extract"),
     }
