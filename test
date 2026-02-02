@@ -232,18 +232,20 @@ async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
 async def search(
     q: str = Query(..., min_length=1),
     limit: int = Query(5, ge=1, le=20),
-    topic: Optional[str] = Query(None, min_length=1),
-    wiki: Optional[str] = Query(None, min_length=1),
+    topic: Optional[str] = Query(None),
+    wiki: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
+    # Determine base
     if wiki:
         base = normalize_base(wiki)
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
     else:
-        resolution_key = topic or q
-        base, _tried = await resolve_best_base(resolution_key)
+        # If topic is missing, resolve using q as a best effort
+        resolve_from = topic or q
+        base, _tried = await resolve_best_base(resolve_from)
         if not base:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for search")
+            raise HTTPException(status_code=404, detail="could not resolve wiki base")
 
     used_base, data = await try_wiki_chain(
         [base],
@@ -287,26 +289,28 @@ async def search(
 @app.get("/page")
 async def page(
     title: str = Query(..., min_length=1),
-    topic: Optional[str] = Query(None, min_length=1),
-    wiki: Optional[str] = Query(None, min_length=1),
+    topic: Optional[str] = Query(None),
+    wiki: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
+    # Determine base
     if wiki:
         base = normalize_base(wiki)
         if not allowed_host(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
     else:
-        resolution_key = topic or title
-        base, _tried = await resolve_best_base(resolution_key)
+        # If topic is missing, resolve using title as a best effort
+        resolve_from = topic or title
+        base, _tried = await resolve_best_base(resolve_from)
         if not base:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for page")
+            raise HTTPException(status_code=404, detail="could not resolve wiki base")
 
     used_base, data = await try_wiki_chain(
         [base],
         {
             "action": "query",
             "prop": "extracts|info",
+            "exintro": "1",
             "explaintext": "1",
-            "exchars": 4000,
             "inprop": "url",
             "titles": title,
             "format": "json",
