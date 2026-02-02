@@ -241,6 +241,7 @@ async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, Any]:
 @app.get("/search")
 async def search(
     q: str = Query(..., min_length=1),
+    topic: Optional[str] = Query(None, min_length=1),
     limit: int = Query(5, ge=1, le=20),
     wiki: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
@@ -259,9 +260,13 @@ async def search(
             },
         )
     else:
-        best, _tried = await resolve_best_base(q)
+        if not topic:
+            raise HTTPException(status_code=400, detail="topic is required when wiki is not provided")
+
+        best, _tried = await resolve_best_base(topic)
         if not best:
-            raise HTTPException(status_code=404, detail="could not resolve wiki for search query")
+            raise HTTPException(status_code=404, detail="could not resolve wiki for topic")
+
         used_base, data = await try_wiki_chain(
             [best],
             {
@@ -277,10 +282,10 @@ async def search(
     results: List[Dict[str, Any]] = []
 
     for item in items:
-        title = item.get("title")
-        if not title:
+        title_val = item.get("title")
+        if not title_val:
             continue
-        title_str = str(title).strip()
+        title_str = str(title_val).strip()
         if not title_str:
             continue
 
@@ -294,7 +299,71 @@ async def search(
             }
         )
 
-    return {"wiki": used_base, "query": q, "limit": limit, "results": results}
+    return {"topic": topic or "", "wiki": used_base, "query": q, "limit": limit, "results": results}
+
+
+@app.get("/page")
+async def page(
+    title: str = Query(..., min_length=1),
+    topic: Optional[str] = Query(None, min_length=1),
+    wiki: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    if wiki:
+        base = normalize_base(wiki)
+        if not allowed_host(base):
+            raise HTTPException(status_code=403, detail="wiki host not allowed")
+        used_base, data = await try_wiki_chain(
+            [base],
+            {
+                "action": "query",
+                "prop": "extracts|info",
+                "exintro": "1",
+                "explaintext": "1",
+                "inprop": "url",
+                "titles": title,
+                "format": "json",
+            },
+        )
+    else:
+        if not topic:
+            raise HTTPException(status_code=400, detail="topic is required when wiki is not provided")
+
+        best, _tried = await resolve_best_base(topic)
+        if not best:
+            raise HTTPException(status_code=404, detail="could not resolve wiki for topic")
+
+        used_base, data = await try_wiki_chain(
+            [best],
+            {
+                "action": "query",
+                "prop": "extracts|info",
+                "exintro": "1",
+                "explaintext": "1",
+                "inprop": "url",
+                "titles": title,
+                "format": "json",
+            },
+        )
+
+    pages = data.get("query", {}).get("pages", {})
+    if not pages:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    page_obj = next(iter(pages.values()))
+    if "missing" in page_obj:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    resolved_title = page_obj.get("title") or title
+
+    return {
+        "topic": topic or "",
+        "wiki": used_base,
+        "title": resolved_title,
+        "pageid": page_obj.get("pageid"),
+        "url": page_obj.get("fullurl") or page_url(used_base, str(resolved_title)),
+        "extract": page_obj.get("extract"),
+    }
+
 
 
 @app.get("/page")
