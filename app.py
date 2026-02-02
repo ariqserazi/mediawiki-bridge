@@ -125,7 +125,7 @@ async def fetch_extract_with_parse(base: str, title: str) -> str:
     if not parse_html:
         return ""
 
-    return best_paragraphs(str(parse_html), max_paras=3, max_chars=900)
+    return best_paragraphs(str(parse_html), max_paras=8, max_chars=3000)
 
 def normalize_base(url: str) -> str:
     parsed = urlparse((url or "").strip())
