@@ -64,6 +64,11 @@ def clean_snippet(value: Any) -> str:
     s = TAG_RE.sub("", s)
     return s.strip()
 
+def _is_roman_numeral(t: Any) -> bool:
+    try:
+        return str(t).strip().lower() in ROMANS
+    except Exception:
+        return False
 
 # -------------------------
 # Topic resolution
