@@ -326,6 +326,40 @@ async def resolve_topic(topic: str) -> str:
 
     raise HTTPException(status_code=404, detail="could not resolve topic to fandom.com or wiki.gg")
 
+async def resolve_title(base: str, title: str) -> str:
+    """
+    Resolve MediaWiki redirects and return the canonical page title.
+    Works for Episode_1 → The Storm Dragon, Veldora.
+    """
+    data = await mediawiki_get(
+        base,
+        {
+            "action": "query",
+            "titles": title,
+            "redirects": "1",
+            "format": "json",
+        },
+    )
+
+    pages = (data.get("query") or {}).get("pages") or {}
+    page = next(iter(pages.values()), None)
+
+    if not page or "missing" in page:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    return page.get("title") or title
+
+def normalize_episode_title(raw: str) -> Optional[str]:
+    s = raw.strip().lower()
+
+    m = re.fullmatch(r"(episode\s*)?0*(\d+)", s)
+    if m:
+        return f"Episode_{int(m.group(2))}"
+
+    if s.startswith("episode_"):
+        return s.title().replace(" ", "_")
+
+    return None
 
 # -------------------------
 # MediaWiki fetch with fallback
@@ -422,13 +456,20 @@ async def page(
 ) -> Dict[str, Any]:
     base = await resolve_topic(topic)
 
+    # 1. Normalize episode numbers if applicable
+    episode_title = normalize_episode_title(title)
+    lookup_title = episode_title or title
+
+    # 2. Resolve redirects FIRST
+    resolved_title = await resolve_title(base, lookup_title)
+
+    # 3. Parse the resolved canonical page
     data = await mediawiki_get(
         base,
         {
             "action": "parse",
-            "page": title,
+            "page": resolved_title,
             "prop": "text",
-            "redirects": "1",
             "format": "json",
         },
     )
@@ -437,15 +478,11 @@ async def page(
     if not parse:
         raise HTTPException(status_code=404, detail="page not found")
 
-    resolved_title = parse.get("title") or title
     pageid = parse.get("pageid")
-
     text_obj = parse.get("text") or {}
     parse_html = text_obj.get("*") or ""
 
     extract_text = extract_all_visible_text(parse_html)
-
-
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
 
