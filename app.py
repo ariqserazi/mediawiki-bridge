@@ -127,6 +127,24 @@ async def fetch_extract_with_parse(base: str, title: str) -> str:
 
     return best_paragraphs(str(parse_html), max_paras=10000, max_chars=1000000)
 
+def extract_all_paragraphs(parse_html: str) -> str:
+    if not parse_html:
+        return ""
+
+    # Only remove scripts, styles, comments (safe)
+    s = SCRIPT_STYLE_RE.sub(" ", parse_html)
+    s = COMMENT_RE.sub(" ", s)
+
+    paragraphs: List[str] = []
+
+    for m in PARA_RE.finditer(s):
+        text = strip_html_to_text(m.group(1))
+        if text:
+            paragraphs.append(text)
+
+    return "\n\n".join(paragraphs).strip()
+
+
 def normalize_base(url: str) -> str:
     parsed = urlparse((url or "").strip())
     host = (parsed.hostname or "").lower()
@@ -396,46 +414,35 @@ async def page(
     data = await mediawiki_get(
         base,
         {
-            "action": "query",
-            "prop": "extracts|info",
-            "explaintext": "1",
-            "inprop": "url",
-            "titles": title,
+            "action": "parse",
+            "page": title,
+            "prop": "text",
             "redirects": "1",
             "format": "json",
         },
     )
 
-    pages = data.get("query", {}).get("pages", {})
-    page_obj = next(iter(pages.values()), None)
-
-    if not page_obj or "missing" in page_obj:
+    parse = data.get("parse")
+    if not parse:
         raise HTTPException(status_code=404, detail="page not found")
 
-    resolved_title = page_obj.get("title") or title
-    full_url = page_obj.get("fullurl") or page_url(base, str(resolved_title))
+    resolved_title = parse.get("title") or title
+    pageid = parse.get("pageid")
 
-    extract_val = page_obj.get("extract")
-    extract_text = (str(extract_val).strip() if extract_val else "")
+    text_obj = parse.get("text") or {}
+    parse_html = text_obj.get("*") or ""
 
-    extract_source = "query_extracts_full"
-
-    # if not extract_text:
-    #     extract_text = await fetch_extract_with_query(base, str(resolved_title), intro_only=False)
-    #     if extract_text:
-    #         extract_source = "query_extracts_full"
+    extract_text = extract_all_paragraphs(parse_html)
 
     if not extract_text:
-        extract_text = await fetch_extract_with_parse(base, str(resolved_title))
-        if extract_text:
-            extract_source = "parse_research"
+        raise HTTPException(status_code=404, detail="no extractable content")
 
     return {
         "topic": topic,
         "wiki": base,
         "title": resolved_title,
-        "pageid": page_obj.get("pageid"),
-        "url": full_url,
-        "extract": extract_text or None,
-        "extract_source": extract_source if extract_text else None,
+        "pageid": pageid,
+        "url": page_url(base, resolved_title),
+        "extract": extract_text,
+        "extract_source": "parse_full",
     }
