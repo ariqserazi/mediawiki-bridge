@@ -349,6 +349,30 @@ async def resolve_title(base: str, title: str) -> str:
 
     return page.get("title") or title
 
+async def resolve_via_http_redirect(base: str, title: str) -> Optional[str]:
+    """
+    Fallback for Fandom frontend redirects (e.g. Episode_1 on Tensura).
+    Performs a HEAD request to /wiki/{title} and captures the final URL.
+    """
+    url = page_url(base, title)
+
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": USER_AGENT},
+        follow_redirects=True,
+    ) as client:
+        try:
+            r = await client.head(url)
+            final = str(r.url)
+        except Exception:
+            return None
+
+    if "/wiki/" not in final:
+        return None
+
+    return final.split("/wiki/", 1)[1].replace("_", " ")
+
+
 def normalize_episode_title(raw: str) -> Optional[str]:
     s = raw.strip().lower()
 
@@ -461,7 +485,17 @@ async def page(
     lookup_title = episode_title or title
 
     # 2. Resolve redirects FIRST
-    resolved_title = await resolve_title(base, lookup_title)
+    # Step A: try real MediaWiki redirects
+    try:
+        resolved_title = await resolve_title(base, lookup_title)
+    except HTTPException:
+        resolved_title = lookup_title
+
+    # Step B: try frontend redirect fallback (Tensura case)
+    fallback = await resolve_via_http_redirect(base, resolved_title)
+    if fallback:
+        resolved_title = fallback
+
 
     # 3. Parse the resolved canonical page
     data = await mediawiki_get(
