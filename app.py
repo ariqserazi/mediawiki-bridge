@@ -127,22 +127,33 @@ async def fetch_extract_with_parse(base: str, title: str) -> str:
 
     return best_paragraphs(str(parse_html), max_paras=10000, max_chars=1000000)
 
-def extract_all_paragraphs(parse_html: str) -> str:
+def extract_all_visible_text(parse_html: str) -> str:
     if not parse_html:
         return ""
 
-    # Only remove scripts, styles, comments (safe)
-    s = SCRIPT_STYLE_RE.sub(" ", parse_html)
+    s = parse_html
+
+    # Remove scripts, styles, comments
+    s = SCRIPT_STYLE_RE.sub(" ", s)
     s = COMMENT_RE.sub(" ", s)
 
-    paragraphs: List[str] = []
+    # Remove navigation / UI junk commonly found on Fandom
+    s = re.sub(r'<nav\b[^>]*>.*?</nav>', ' ', s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r'<aside\b[^>]*>.*?</aside>', ' ', s, flags=re.DOTALL | re.IGNORECASE)
+    s = re.sub(r'<footer\b[^>]*>.*?</footer>', ' ', s, flags=re.DOTALL | re.IGNORECASE)
 
-    for m in PARA_RE.finditer(s):
-        text = strip_html_to_text(m.group(1))
-        if text:
-            paragraphs.append(text)
+    # Convert line-breaking tags to newlines so lists remain readable
+    s = re.sub(r'</(p|li|dd|dt|h1|h2|h3|h4|h5|h6)>', '\n\n', s, flags=re.IGNORECASE)
 
-    return "\n\n".join(paragraphs).strip()
+    # Strip remaining HTML
+    s = html.unescape(s)
+    s = TAG_RE.sub(" ", s)
+
+    # Normalize whitespace
+    s = re.sub(r'\n\s*\n+', '\n\n', s)
+    s = re.sub(r'[ \t]+', ' ', s)
+
+    return s.strip()
 
 
 def normalize_base(url: str) -> str:
@@ -432,7 +443,8 @@ async def page(
     text_obj = parse.get("text") or {}
     parse_html = text_obj.get("*") or ""
 
-    extract_text = extract_all_paragraphs(parse_html)
+    extract_text = extract_all_visible_text(parse_html)
+
 
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
