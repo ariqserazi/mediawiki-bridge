@@ -308,6 +308,11 @@ async def _probe_api(client: httpx.AsyncClient, api_url: str, hint: str) -> bool
 
 
 async def resolve_topic(topic: str) -> str:
+    if topic.startswith("http://") or topic.startswith("https://"):
+        base = normalize_base(topic)
+        if not host_is_allowed(base):
+            raise HTTPException(status_code=403, detail="wiki host not allowed")
+        return base
     slugs = candidate_slugs(topic)
 
     headers = {"User-Agent": USER_AGENT}
