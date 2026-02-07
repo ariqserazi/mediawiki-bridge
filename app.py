@@ -2,10 +2,13 @@ import os
 import re
 import html
 from typing import Any, Dict, Optional, List
+from fastapi.responses import HTMLResponse
+
 from urllib.parse import urlparse, quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 app = FastAPI(
     title="MediaWiki Bridge API",
@@ -429,6 +432,86 @@ def health() -> Dict[str, bool]:
 async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, str]:
     wiki = await resolve_topic(topic)
     return {"topic": topic, "wiki": wiki}
+
+
+@app.get("/render", response_class=HTMLResponse)
+async def render(
+    topic: str = Query(..., min_length=1),
+    title: Optional[str] = Query(None),
+    pageid: Optional[int] = Query(None),
+):
+    base = await resolve_topic(topic)
+
+    if not title and pageid is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Either title or pageid must be provided",
+        )
+
+    resolved_title = None
+
+    # Resolve title if provided
+    if title:
+        episode_title = normalize_episode_title(title)
+        lookup_title = episode_title or title
+
+        try:
+            resolved_title = await resolve_title(base, lookup_title)
+        except HTTPException:
+            fallback = await resolve_via_http_redirect(base, lookup_title)
+            resolved_title = fallback or lookup_title
+
+    parse_params = {
+        "action": "parse",
+        "prop": "text",
+        "format": "json",
+        "formatversion": 2,
+    }
+
+    if pageid is not None:
+        parse_params["pageid"] = pageid
+    else:
+        parse_params["page"] = resolved_title
+
+    data = await mediawiki_get(base, parse_params)
+
+    parse = data.get("parse")
+    if not parse:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    html_content = parse.get("text")
+    if not html_content:
+        raise HTTPException(status_code=404, detail="no renderable content")
+
+    # Minimal wrapper so browser displays cleanly
+    return HTMLResponse(
+        content=f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{parse.get("title", "MediaWiki Render")}</title>
+<style>
+    body {{
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        line-height: 1.6;
+        max-width: 900px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        background: #fff;
+        color: #111;
+    }}
+    img {{ max-width: 100%; }}
+    table {{ border-collapse: collapse; }}
+    th, td {{ border: 1px solid #ccc; padding: 0.4rem; }}
+</style>
+</head>
+<body>
+{html_content}
+</body>
+</html>
+"""
+    )
 
 
 @app.get("/search")
