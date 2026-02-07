@@ -481,49 +481,50 @@ async def search(
 @app.get("/page")
 async def page(
     topic: str = Query(..., min_length=1),
-    title: str = Query(..., min_length=1),
+    title: Optional[str] = Query(None),
     pageid: Optional[int] = Query(None),
 ) -> Dict[str, Any]:
     base = await resolve_topic(topic)
 
-    # 1. Normalize episode numbers if applicable
-    episode_title = normalize_episode_title(title)
-    lookup_title = episode_title or title
+    if not title and pageid is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Either title or pageid must be provided",
+        )
 
-    # 2. Resolve redirects FIRST
-    # Step A: try real MediaWiki redirects
-    try:
-        resolved_title = await resolve_title(base, lookup_title)
-    except HTTPException:
-        # 🔑 NEW: try frontend redirect if API title resolution fails
-        fallback = await resolve_via_http_redirect(base, lookup_title)
-        if fallback:
-            resolved_title = fallback
-        else:
-            resolved_title = lookup_title
+    resolved_title = None
+
+    if title:
+        episode_title = normalize_episode_title(title)
+        lookup_title = episode_title or title
+
+        try:
+            resolved_title = await resolve_title(base, lookup_title)
+        except HTTPException:
+            fallback = await resolve_via_http_redirect(base, lookup_title)
+            resolved_title = fallback or lookup_title
 
     parse_params = {
         "action": "parse",
         "prop": "text",
         "format": "json",
     }
+
     if pageid is not None:
         parse_params["pageid"] = pageid
     else:
         parse_params["page"] = resolved_title
 
-    # 3. Parse the resolved canonical page
     data = await mediawiki_get(base, parse_params)
-
 
     parse = data.get("parse")
     if not parse:
         raise HTTPException(status_code=404, detail="page not found")
 
-    pageid = parse.get("pageid")
-    text_obj = parse.get("text") or {}
-    parse_html = text_obj.get("*") or ""
+    parsed_pageid = parse.get("pageid")
+    resolved_title = parse.get("title")
 
+    parse_html = (parse.get("text") or {}).get("*") or ""
     extract_text = extract_all_visible_text(parse_html)
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
@@ -532,7 +533,7 @@ async def page(
         "topic": topic,
         "wiki": base,
         "title": resolved_title,
-        "pageid": pageid,
+        "pageid": parsed_pageid,
         "url": page_url(base, resolved_title),
         "extract": extract_text,
         "extract_source": "parse_full",
