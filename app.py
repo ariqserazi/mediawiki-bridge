@@ -482,6 +482,7 @@ async def search(
 async def page(
     topic: str = Query(..., min_length=1),
     title: str = Query(..., min_length=1),
+    pageid: Optional[int] = Query(None),
 ) -> Dict[str, Any]:
     base = await resolve_topic(topic)
 
@@ -501,18 +502,19 @@ async def page(
         else:
             resolved_title = lookup_title
 
-
+    parse_params = {
+        "action": "parse",
+        "prop": "text",
+        "format": "json",
+    }
+    if pageid is not None:
+        parse_params["pageid"] = pageid
+    else:
+        parse_params["page"] = resolved_title
 
     # 3. Parse the resolved canonical page
-    data = await mediawiki_get(
-        base,
-        {
-            "action": "parse",
-            "page": resolved_title,
-            "prop": "text",
-            "format": "json",
-        },
-    )
+    data = await mediawiki_get(base, parse_params)
+
 
     parse = data.get("parse")
     if not parse:
