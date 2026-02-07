@@ -494,12 +494,13 @@ async def page(
     try:
         resolved_title = await resolve_title(base, lookup_title)
     except HTTPException:
-        resolved_title = lookup_title
+        # 🔑 NEW: try frontend redirect if API title resolution fails
+        fallback = await resolve_via_http_redirect(base, lookup_title)
+        if fallback:
+            resolved_title = fallback
+        else:
+            resolved_title = lookup_title
 
-    # Step B: try frontend redirect fallback (Tensura case)
-    fallback = await resolve_via_http_redirect(base, resolved_title)
-    if fallback:
-        resolved_title = fallback
 
 
     # 3. Parse the resolved canonical page
