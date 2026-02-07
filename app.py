@@ -492,8 +492,10 @@ async def page(
             detail="Either title or pageid must be provided",
         )
 
+    requested_title = title
     resolved_title = None
 
+    # Resolve title only if provided
     if title:
         episode_title = normalize_episode_title(title)
         lookup_title = episode_title or title
@@ -504,6 +506,7 @@ async def page(
             fallback = await resolve_via_http_redirect(base, lookup_title)
             resolved_title = fallback or lookup_title
 
+    # Build parse params
     parse_params = {
         "action": "parse",
         "prop": "text",
@@ -521,8 +524,8 @@ async def page(
     if not parse:
         raise HTTPException(status_code=404, detail="page not found")
 
+    canonical_title = parse.get("title")
     parsed_pageid = parse.get("pageid")
-    resolved_title = parse.get("title")
 
     parse_html = (parse.get("text") or {}).get("*") or ""
     extract_text = extract_all_visible_text(parse_html)
@@ -532,9 +535,15 @@ async def page(
     return {
         "topic": topic,
         "wiki": base,
-        "title": resolved_title,
+
+        # 🔒 Stable, non-confusing fields
+        "requested_title": requested_title,
+        "resolved_title": resolved_title,
+        "canonical_title": canonical_title,
+
         "pageid": parsed_pageid,
-        "url": page_url(base, resolved_title),
+        "url": page_url(base, canonical_title),
+
         "extract": extract_text,
         "extract_source": "parse_full",
     }
