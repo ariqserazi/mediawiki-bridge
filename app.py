@@ -728,7 +728,16 @@ async def page(
     return {
         "topic": topic,
         "wiki": base,
-        "error": "unknown_failure",
-        "message": "Page could not be rendered, but no explicit error was raised."
+        "source": source,
+
+        "requested_title": requested_title,
+        "resolved_title": resolved_title,
+        "canonical_title": canonical_title,
+
+        "pageid": parsed_pageid,
+        "url": page_url(base, canonical_title),
+
+        "extract": extract_text,
+        "extract_source": "parse_full",
     }
 
