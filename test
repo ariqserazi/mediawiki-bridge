@@ -2,10 +2,13 @@ import os
 import re
 import html
 from typing import Any, Dict, Optional, List
+from fastapi.responses import HTMLResponse
+
 from urllib.parse import urlparse, quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 app = FastAPI(
     title="MediaWiki Bridge API",
@@ -29,6 +32,46 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # -------------------------
 # URL helpers
 # -------------------------
+
+async def fandom_hub_lookup(topic: str) -> Optional[str]:
+    """
+    Use Fandom's global search to discover the real wiki base.
+    Returns base URL like https://lagooncompany.fandom.com
+    """
+    search_url = "https://www.fandom.com/api/v1/Search/List"
+
+    params = {
+        "query": topic,
+        "limit": 5,
+        "ns": 0,
+    }
+
+    headers = {"User-Agent": USER_AGENT}
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
+        try:
+            r = await client.get(search_url, params=params)
+            if r.status_code != 200:
+                return None
+
+            data = r.json()
+            items = data.get("items", [])
+
+            for item in items:
+                wiki_url = item.get("url")
+                if not wiki_url:
+                    continue
+
+                parsed = urlparse(wiki_url)
+                host = parsed.hostname or ""
+                if host.endswith("fandom.com"):
+                    return f"{parsed.scheme}://{host}"
+
+        except Exception:
+            return None
+
+    return None
+
 def strip_html_to_text(raw_html: str) -> str:
     if not raw_html:
         return ""
@@ -308,6 +351,11 @@ async def _probe_api(client: httpx.AsyncClient, api_url: str, hint: str) -> bool
 
 
 async def resolve_topic(topic: str) -> str:
+    if topic.startswith("http://") or topic.startswith("https://"):
+        base = normalize_base(topic)
+        if not host_is_allowed(base):
+            raise HTTPException(status_code=403, detail="wiki host not allowed")
+        return base
     slugs = candidate_slugs(topic)
 
     headers = {"User-Agent": USER_AGENT}
@@ -324,8 +372,75 @@ async def resolve_topic(topic: str) -> str:
                     if ok:
                         return base
 
-    raise HTTPException(status_code=404, detail="could not resolve topic to fandom.com or wiki.gg")
+    # --- FINAL FANDOM HUB FALLBACK ---
+    fandom_base = await fandom_hub_lookup(topic)
+    if fandom_base and host_is_allowed(fandom_base):
+        return fandom_base
 
+    raise HTTPException(
+        status_code=404,
+        detail="could not resolve topic to fandom.com or wiki.gg"
+    )
+
+
+async def resolve_title(base: str, title: str) -> str:
+    """
+    Resolve MediaWiki redirects and return the canonical page title.
+    Works for Episode_1 → The Storm Dragon, Veldora.
+    """
+    data = await mediawiki_get(
+        base,
+        {
+            "action": "query",
+            "titles": title,
+            "redirects": "1",
+            "format": "json",
+        },
+    )
+
+    pages = (data.get("query") or {}).get("pages") or {}
+    page = next(iter(pages.values()), None)
+
+    if not page or "missing" in page:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    return page.get("title") or title
+
+async def resolve_via_http_redirect(base: str, title: str) -> Optional[str]:
+    """
+    Fallback for Fandom frontend redirects (e.g. Episode_1 on Tensura).
+    Performs a HEAD request to /wiki/{title} and captures the final URL.
+    """
+    url = page_url(base, title)
+
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": USER_AGENT},
+        follow_redirects=True,
+    ) as client:
+        try:
+            r = await client.head(url)
+            final = str(r.url)
+        except Exception:
+            return None
+
+    if "/wiki/" not in final:
+        return None
+
+    return final.split("/wiki/", 1)[1].replace("_", " ")
+
+
+def normalize_episode_title(raw: str) -> Optional[str]:
+    s = raw.strip().lower()
+
+    m = re.fullmatch(r"(episode\s*)?0*(\d+)", s)
+    if m:
+        return f"Episode_{int(m.group(2))}"
+
+    if s.startswith("episode_"):
+        return s.title().replace(" ", "_")
+
+    return None
 
 # -------------------------
 # MediaWiki fetch with fallback
@@ -365,7 +480,87 @@ def health() -> Dict[str, bool]:
 @app.get("/resolve")
 async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, str]:
     wiki = await resolve_topic(topic)
-    return {"topic": topic, "wiki": wiki}
+    return {"topic": topic, "wiki": wiki,"resolution_method": "fandom_hub",}
+
+
+@app.get("/render", response_class=HTMLResponse)
+async def render(
+    topic: str = Query(..., min_length=1),
+    title: Optional[str] = Query(None),
+    pageid: Optional[int] = Query(None),
+):
+    base = await resolve_topic(topic)
+
+    if not title and pageid is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Either title or pageid must be provided",
+        )
+
+    resolved_title = None
+
+    # Resolve title if provided
+    if title:
+        episode_title = normalize_episode_title(title)
+        lookup_title = episode_title or title
+
+        try:
+            resolved_title = await resolve_title(base, lookup_title)
+        except HTTPException:
+            fallback = await resolve_via_http_redirect(base, lookup_title)
+            resolved_title = fallback or lookup_title
+
+    parse_params = {
+        "action": "parse",
+        "prop": "text",
+        "format": "json",
+        "formatversion": 2,
+    }
+
+    if pageid is not None:
+        parse_params["pageid"] = pageid
+    else:
+        parse_params["page"] = resolved_title
+
+    data = await mediawiki_get(base, parse_params)
+
+    parse = data.get("parse")
+    if not parse:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    html_content = parse.get("text")
+    if not html_content:
+        raise HTTPException(status_code=404, detail="no renderable content")
+
+    # Minimal wrapper so browser displays cleanly
+    return HTMLResponse(
+        content=f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{parse.get("title", "MediaWiki Render")}</title>
+<style>
+    body {{
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        line-height: 1.6;
+        max-width: 900px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        background: #fff;
+        color: #111;
+    }}
+    img {{ max-width: 100%; }}
+    table {{ border-collapse: collapse; }}
+    th, td {{ border: 1px solid #ccc; padding: 0.4rem; }}
+</style>
+</head>
+<body>
+{html_content}
+</body>
+</html>
+"""
+    )
 
 
 @app.get("/search")
@@ -418,43 +613,69 @@ async def search(
 @app.get("/page")
 async def page(
     topic: str = Query(..., min_length=1),
-    title: str = Query(..., min_length=1),
+    title: Optional[str] = Query(None),
+    pageid: Optional[int] = Query(None),
 ) -> Dict[str, Any]:
     base = await resolve_topic(topic)
 
-    data = await mediawiki_get(
-        base,
-        {
-            "action": "parse",
-            "page": title,
-            "prop": "text",
-            "redirects": "1",
-            "format": "json",
-        },
-    )
+    if not title and pageid is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Either title or pageid must be provided",
+        )
+
+    requested_title = title
+    resolved_title = None
+
+    # Resolve title only if provided
+    if title:
+        episode_title = normalize_episode_title(title)
+        lookup_title = episode_title or title
+
+        try:
+            resolved_title = await resolve_title(base, lookup_title)
+        except HTTPException:
+            fallback = await resolve_via_http_redirect(base, lookup_title)
+            resolved_title = fallback or lookup_title
+
+    # Build parse params
+    parse_params = {
+        "action": "parse",
+        "prop": "text",
+        "format": "json",
+    }
+
+    if pageid is not None:
+        parse_params["pageid"] = pageid
+    else:
+        parse_params["page"] = resolved_title
+
+    data = await mediawiki_get(base, parse_params)
 
     parse = data.get("parse")
     if not parse:
         raise HTTPException(status_code=404, detail="page not found")
 
-    resolved_title = parse.get("title") or title
-    pageid = parse.get("pageid")
+    canonical_title = parse.get("title")
+    parsed_pageid = parse.get("pageid")
 
-    text_obj = parse.get("text") or {}
-    parse_html = text_obj.get("*") or ""
-
+    parse_html = (parse.get("text") or {}).get("*") or ""
     extract_text = extract_all_visible_text(parse_html)
-
-
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
 
     return {
         "topic": topic,
         "wiki": base,
-        "title": resolved_title,
-        "pageid": pageid,
-        "url": page_url(base, resolved_title),
+
+        # 🔒 Stable, non-confusing fields
+        "requested_title": requested_title,
+        "resolved_title": resolved_title,
+        "canonical_title": canonical_title,
+
+        "pageid": parsed_pageid,
+        "url": page_url(base, canonical_title),
+
         "extract": extract_text,
         "extract_source": "parse_full",
     }
