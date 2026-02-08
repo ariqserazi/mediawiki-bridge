@@ -27,6 +27,7 @@ PARA_RE = re.compile(r"<p\b[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
 SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+MAX_EXTRACT_CHARS = 250_000  # adjust as needed
 
 
 # -------------------------
@@ -537,7 +538,24 @@ async def render(
     else:
         parse_params["page"] = resolved_title
 
-    data = await mediawiki_get(base, parse_params)
+    try:
+        data = await mediawiki_get(base, parse_params)
+    except HTTPException as e:
+        bridge_page_url = (
+            "https://mediawiki-bridge.onrender.com/page"
+            f"?wiki={quote(base)}"
+            f"&topic={quote(title or topic)}"
+            f"&title={quote((title or topic).replace(' ', '_'))}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "parse_failed",
+                "message": "Unable to render page via API.",
+                "view_full_page": bridge_page_url,
+            },
+        )
+
 
     parse = data.get("parse")
     if not parse:
@@ -690,19 +708,27 @@ async def page(
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
 
-    return {
-        "topic": topic,
-        "wiki": base,
-        "source": source,
+    if len(extract_text) > MAX_EXTRACT_CHARS:
+        bridge_page_url = (
+            "https://mediawiki-bridge.onrender.com/page"
+            f"?wiki={quote(base)}"
+            f"&topic={quote(canonical_title)}"
+            f"&title={quote(canonical_title.replace(' ', '_'))}"
+        )
 
-        # 🔒 Stable, non-confusing fields
-        "requested_title": requested_title,
-        "resolved_title": resolved_title,
-        "canonical_title": canonical_title,
+        return {
+            "topic": topic,
+            "wiki": base,
+            "source": source,
 
-        "pageid": parsed_pageid,
-        "url": page_url(base, canonical_title),
+            "requested_title": requested_title,
+            "resolved_title": resolved_title,
+            "canonical_title": canonical_title,
 
-        "extract": extract_text,
-        "extract_source": "parse_full",
-    }
+            "pageid": parsed_pageid,
+            "url": page_url(base, canonical_title),
+
+            "error": "content_too_large",
+            "message": "This page is too large to display via the API.",
+            "view_full_page": bridge_page_url,
+        }
