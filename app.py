@@ -538,7 +538,24 @@ async def render(
     else:
         parse_params["page"] = resolved_title
 
-    data = await mediawiki_get(base, parse_params)
+    try:
+        data = await mediawiki_get(base, parse_params)
+    except HTTPException as e:
+        bridge_page_url = (
+            "https://mediawiki-bridge.onrender.com/page"
+            f"?wiki={quote(base)}"
+            f"&topic={quote(title or topic)}"
+            f"&title={quote((title or topic).replace(' ', '_'))}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "parse_failed",
+                "message": "Unable to render page via API.",
+                "view_full_page": bridge_page_url,
+            },
+        )
+
 
     parse = data.get("parse")
     if not parse:
@@ -692,26 +709,26 @@ async def page(
         raise HTTPException(status_code=404, detail="no extractable content")
 
     if len(extract_text) > MAX_EXTRACT_CHARS:
-        bridge_page_url = (
-            "https://mediawiki-bridge.onrender.com/page"
-            f"?wiki={quote(base)}"
-            f"&topic={quote(canonical_title)}"
-            f"&title={quote(canonical_title.replace(' ', '_'))}"
-        )
-
         return {
             "topic": topic,
             "wiki": base,
             "source": source,
-
-            "requested_title": requested_title,
-            "resolved_title": resolved_title,
             "canonical_title": canonical_title,
-
             "pageid": parsed_pageid,
-            "url": page_url(base, canonical_title),
-
             "error": "content_too_large",
-            "message": "This page is too large to display via the API.",
-            "view_full_page": bridge_page_url,
+            "view_full_page": (
+                "https://mediawiki-bridge.onrender.com/page"
+                f"?wiki={quote(base)}"
+                f"&topic={quote(canonical_title)}"
+                f"&title={quote(canonical_title.replace(' ', '_'))}"
+            )
         }
+
+        # --- SAFETY NET ---
+    return {
+        "topic": topic,
+        "wiki": base,
+        "error": "unknown_failure",
+        "message": "Page could not be rendered, but no explicit error was raised."
+    }
+
