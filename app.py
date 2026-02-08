@@ -18,7 +18,7 @@ app = FastAPI(
 USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.5.1")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30.0"))
 
-ALLOWED_WIKI_HOST_SUFFIXES = ("fandom.com", "wiki.gg")
+ALLOWED_WIKI_HOST_SUFFIXES = ("fandom.com", "wiki.gg", "wikipedia.org",)
 
 TAG_RE = re.compile(r"<[^>]+>")
 STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
@@ -351,10 +351,10 @@ async def resolve_topic(topic: str) -> str:
                     return base
 
         # 4. FINAL FALLBACK: Wikipedia (generic, not slug-based)
-        # wikipedia_base = "https://en.wikipedia.org"
-        # for api in candidate_action_apis(wikipedia_base):
-        #     if await _probe_api(client, api, hint=topic):
-        #         return wikipedia_base
+        wikipedia_base = "https://en.wikipedia.org"
+        for api in candidate_action_apis(wikipedia_base):
+            if await _probe_api(client, api, hint=topic):
+                return wikipedia_base
 
     raise HTTPException(
         status_code=404,
