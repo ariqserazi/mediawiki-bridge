@@ -32,6 +32,45 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # -------------------------
 # URL helpers
 # -------------------------
+
+async def fandom_hub_lookup(topic: str) -> Optional[str]:
+    """
+    Use Fandom's global search to discover the real wiki base.
+    Returns base URL like https://lagooncompany.fandom.com
+    """
+    search_url = "https://www.fandom.com/api/v1/Search/List"
+
+    params = {
+        "query": topic,
+        "limit": 5,
+        "ns": 0,
+    }
+
+    headers = {"User-Agent": USER_AGENT}
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
+        try:
+            r = await client.get(search_url, params=params)
+            if r.status_code != 200:
+                return None
+
+            data = r.json()
+            items = data.get("items", [])
+
+            for item in items:
+                wiki_url = item.get("url")
+                if not wiki_url:
+                    continue
+
+                parsed = urlparse(wiki_url)
+                host = parsed.hostname or ""
+                if host.endswith("fandom.com"):
+                    return f"{parsed.scheme}://{host}"
+
+        except Exception:
+            return None
+
+    return None
 def strip_html_to_text(raw_html: str) -> str:
     if not raw_html:
         return ""
@@ -317,50 +356,37 @@ async def _probe_api(client: httpx.AsyncClient, api_url: str, hint: str) -> bool
         return False
 
 
-async def resolve_topic(topic: str) -> str:
-    # 1. Explicit URL always wins
+async def resolve_topic(topic: str) -> tuple[str, str]:
     if topic.startswith("http://") or topic.startswith("https://"):
         base = normalize_base(topic)
         if not host_is_allowed(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
-        return base
-
+        return base, "explicit"
     slugs = candidate_slugs(topic)
+
     headers = {"User-Agent": USER_AGENT}
-
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
-
-        # 2. Try FANDOM first
         for slug in slugs:
-            base = normalize_base(f"https://{slug}.fandom.com")
-            if not host_is_allowed(base):
-                continue
+            for raw_base in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
+                base = normalize_base(raw_base)
 
-            for api in candidate_action_apis(base):
-                if await _probe_api(client, api, hint=topic):
-                    return base
+                if not host_is_allowed(base):
+                    continue
 
-        # 3. Try WIKI.GG second
-        for slug in slugs:
-            base = normalize_base(f"https://{slug}.wiki.gg")
-            if not host_is_allowed(base):
-                continue
+                for api in candidate_action_apis(base):
+                    ok = await _probe_api(client, api, hint=topic)
+                    if ok:
+                        return base, "slug"
 
-            for api in candidate_action_apis(base):
-                if await _probe_api(client, api, hint=topic):
-                    return base
-
-        # 4. FINAL FALLBACK: Wikipedia (generic, not slug-based)
-        wikipedia_base = "https://en.wikipedia.org"
-        for api in candidate_action_apis(wikipedia_base):
-            if await _probe_api(client, api, hint=topic):
-                return wikipedia_base
+    # --- FINAL FANDOM HUB FALLBACK ---
+    fandom_base = await fandom_hub_lookup(topic)
+    if fandom_base and host_is_allowed(fandom_base):
+        return fandom_base, "fandom_hub"
 
     raise HTTPException(
         status_code=404,
-        detail="could not resolve topic to fandom.com, wiki.gg, or wikipedia.org",
+        detail="could not resolve topic to fandom.com or wiki.gg"
     )
-
 
 async def resolve_title(base: str, title: str) -> str:
     """
@@ -458,8 +484,8 @@ def health() -> Dict[str, bool]:
 
 @app.get("/resolve")
 async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, str]:
-    wiki = await resolve_topic(topic)
-    return {"topic": topic, "wiki": wiki}
+    base, method = await resolve_topic(topic)
+    return {"topic": topic, "wiki": base,"resolution_method": method,}
 
 
 @app.get("/render", response_class=HTMLResponse)
@@ -468,7 +494,7 @@ async def render(
     title: Optional[str] = Query(None),
     pageid: Optional[int] = Query(None),
 ):
-    base = await resolve_topic(topic)
+    base, resolution_method = await resolve_topic(topic)
 
     if not title and pageid is None:
         raise HTTPException(
@@ -548,7 +574,7 @@ async def search(
     q: str = Query(..., min_length=1),
     limit: int = Query(5, ge=1, le=20),
 ) -> Dict[str, Any]:
-    base = await resolve_topic(topic)
+    base, resolution_method = await resolve_topic(topic)
 
     data = await mediawiki_get(
         base,
@@ -595,7 +621,7 @@ async def page(
     title: Optional[str] = Query(None),
     pageid: Optional[int] = Query(None),
 ) -> Dict[str, Any]:
-    base = await resolve_topic(topic)
+    base, resolution_method = await resolve_topic(topic)
 
     if not title and pageid is None:
         raise HTTPException(

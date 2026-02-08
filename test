@@ -618,7 +618,7 @@ async def page(
     title: Optional[str] = Query(None),
     pageid: Optional[int] = Query(None),
 ) -> Dict[str, Any]:
-    base = await resolve_topic(topic)
+    base, resolution_method = await resolve_topic(topic)
 
     if not title and pageid is None:
         raise HTTPException(
