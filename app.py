@@ -387,6 +387,14 @@ async def resolve_topic(topic: str) -> tuple[str, str]:
         status_code=404,
         detail="could not resolve topic to fandom.com or wiki.gg"
     )
+async def resolve_with_optional_base(topic: str, wiki: Optional[str]) -> tuple[str, str]:
+    if wiki:
+        base = normalize_base(wiki)
+        if not host_is_allowed(base):
+            raise HTTPException(status_code=403, detail="wiki host not allowed")
+        return base, "explicit"
+
+    return await resolve_topic(topic)
 
 async def resolve_title(base: str, title: str) -> str:
     """
@@ -483,8 +491,8 @@ def health() -> Dict[str, bool]:
 
 
 @app.get("/resolve")
-async def resolve(topic: str = Query(..., min_length=1)) -> Dict[str, str]:
-    base, method = await resolve_topic(topic)
+async def resolve(topic: str = Query(..., min_length=1), wiki: Optional[str] = Query(None)) -> Dict[str, str]:
+    base, method = await resolve_with_optional_base(topic, wiki)
     return {"topic": topic, "wiki": base,"resolution_method": method,}
 
 
@@ -493,8 +501,10 @@ async def render(
     topic: str = Query(..., min_length=1),
     title: Optional[str] = Query(None),
     pageid: Optional[int] = Query(None),
+    wiki: Optional[str] = Query(None),
+
 ):
-    base, resolution_method = await resolve_topic(topic)
+    base, resolution_method = await resolve_with_optional_base(topic, wiki)
 
     if not title and pageid is None:
         raise HTTPException(
@@ -573,8 +583,9 @@ async def search(
     topic: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
     limit: int = Query(5, ge=1, le=20),
+    wiki: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
-    base, resolution_method = await resolve_topic(topic)
+    base, resolution_method = await resolve_with_optional_base(topic, wiki)
 
     data = await mediawiki_get(
         base,
@@ -620,8 +631,10 @@ async def page(
     topic: str = Query(..., min_length=1),
     title: Optional[str] = Query(None),
     pageid: Optional[int] = Query(None),
+    wiki: Optional[str] = Query(None),
+
 ) -> Dict[str, Any]:
-    base, resolution_method = await resolve_topic(topic)
+    base, resolution_method = await resolve_with_optional_base(topic, wiki)
 
     if not title and pageid is None:
         raise HTTPException(
