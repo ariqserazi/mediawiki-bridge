@@ -538,24 +538,7 @@ async def render(
     else:
         parse_params["page"] = resolved_title
 
-    try:
-        data = await mediawiki_get(base, parse_params)
-    except HTTPException as e:
-        bridge_page_url = (
-            "https://mediawiki-bridge.onrender.com/page"
-            f"?wiki={quote(base)}"
-            f"&topic={quote(title or topic)}"
-            f"&title={quote((title or topic).replace(' ', '_'))}"
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "parse_failed",
-                "message": "Unable to render page via API.",
-                "view_full_page": bridge_page_url,
-            },
-        )
-
+    data = await mediawiki_get(base, parse_params)
 
     parse = data.get("parse")
     if not parse:
