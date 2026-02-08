@@ -27,7 +27,7 @@ PARA_RE = re.compile(r"<p\b[^>]*>(.*?)</p>", re.IGNORECASE | re.DOTALL)
 SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-MAX_EXTRACT_CHARS = 10000  # adjust as needed
+MAX_EXTRACT_CHARS = 20000  # adjust as needed
 
 
 # -------------------------
@@ -717,7 +717,7 @@ async def page(
             "pageid": parsed_pageid,
             "error": "content_too_large",
             "view_full_page": (
-                "https://mediawiki-bridge.onrender.com/page"
+                "https://mediawiki-bridge.onrender.com/render"
                 f"?wiki={quote(base)}"
                 f"&topic={quote(canonical_title)}"
                 f"&title={quote(canonical_title.replace(' ', '_'))}"
