@@ -18,7 +18,7 @@ app = FastAPI(
 USER_AGENT = os.getenv("USER_AGENT", "mediawiki_bridge/1.5.1")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30.0"))
 
-ALLOWED_WIKI_HOST_SUFFIXES = ("fandom.com", "wiki.gg")
+ALLOWED_WIKI_HOST_SUFFIXES = ("fandom.com", "wiki.gg", "wikipedia.org",)
 
 TAG_RE = re.compile(r"<[^>]+>")
 STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for"}
@@ -176,13 +176,20 @@ def is_fandom(base: str) -> bool:
     host = (urlparse(base).hostname or "").lower()
     return host.endswith("fandom.com")
 
+def is_wikipedia(base: str) -> bool:
+    host = (urlparse(base).hostname or "").lower()
+    return host.endswith("wikipedia.org")
+
 
 def candidate_action_apis(base: str) -> List[str]:
     base = normalize_base(base)
+
+    if is_wikipedia(base):
+        return [f"{base}/w/api.php"]
+
     if is_fandom(base):
-        # Fandom usually works on /api.php, sometimes /w/api.php exists too
         return [f"{base}/api.php", f"{base}/w/api.php"]
-    # wiki gg usually uses /w/api.php, some installs also answer /api.php
+
     return [f"{base}/w/api.php", f"{base}/api.php"]
 
 
@@ -311,28 +318,49 @@ async def _probe_api(client: httpx.AsyncClient, api_url: str, hint: str) -> bool
 
 
 async def resolve_topic(topic: str) -> str:
+    # 1. Explicit URL always wins
     if topic.startswith("http://") or topic.startswith("https://"):
         base = normalize_base(topic)
         if not host_is_allowed(base):
             raise HTTPException(status_code=403, detail="wiki host not allowed")
         return base
+
     slugs = candidate_slugs(topic)
-
     headers = {"User-Agent": USER_AGENT}
+
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
+
+        # 2. Try FANDOM first
         for slug in slugs:
-            for raw_base in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
-                base = normalize_base(raw_base)
+            base = normalize_base(f"https://{slug}.fandom.com")
+            if not host_is_allowed(base):
+                continue
 
-                if not host_is_allowed(base):
-                    continue
+            for api in candidate_action_apis(base):
+                if await _probe_api(client, api, hint=topic):
+                    return base
 
-                for api in candidate_action_apis(base):
-                    ok = await _probe_api(client, api, hint=topic)
-                    if ok:
-                        return base
+        # 3. Try WIKI.GG second
+        for slug in slugs:
+            base = normalize_base(f"https://{slug}.wiki.gg")
+            if not host_is_allowed(base):
+                continue
 
-    raise HTTPException(status_code=404, detail="could not resolve topic to fandom.com or wiki.gg")
+            for api in candidate_action_apis(base):
+                if await _probe_api(client, api, hint=topic):
+                    return base
+
+        # 4. FINAL FALLBACK: Wikipedia (generic, not slug-based)
+        wikipedia_base = "https://en.wikipedia.org"
+        for api in candidate_action_apis(wikipedia_base):
+            if await _probe_api(client, api, hint=topic):
+                return wikipedia_base
+
+    raise HTTPException(
+        status_code=404,
+        detail="could not resolve topic to fandom.com, wiki.gg, or wikipedia.org",
+    )
+
 
 async def resolve_title(base: str, title: str) -> str:
     """
@@ -612,12 +640,21 @@ async def page(
 
     parse_html = (parse.get("text") or {}).get("*") or ""
     extract_text = extract_all_visible_text(parse_html)
+    source = (
+    "wikipedia"
+    if is_wikipedia(base)
+    else "fandom"
+    if is_fandom(base)
+    else "wiki.gg"
+    )
+
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
 
     return {
         "topic": topic,
         "wiki": base,
+        "source": source,
 
         # 🔒 Stable, non-confusing fields
         "requested_title": requested_title,
