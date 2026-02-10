@@ -1,5 +1,6 @@
 import os
 import re
+import requests
 import html
 from typing import Any, Dict, Optional, List
 from fastapi.responses import HTMLResponse
@@ -617,18 +618,21 @@ async def search(
         },
     )
 
-
     results: List[Dict[str, Any]] = []
+
     for item in data.get("query", {}).get("search", []):
         title_val = item.get("title")
         if not title_val:
             continue
+
         title_str = str(title_val).strip()
         if not title_str:
             continue
-    snippet = clean_snippet(item.get("snippet"))
-    if not snippet:
-        snippet = "(No text preview available)"
+
+        snippet = clean_snippet(item.get("snippet"))
+        if not snippet:
+            snippet = "(No text preview available)"
+
         results.append(
             {
                 "title": title_str,
@@ -655,6 +659,12 @@ async def page(
     pageid: Optional[int] = Query(None),
     wiki: Optional[str] = Query(None),
 
+    # MODE SWITCH (NEW)
+    mode: str = Query("full", regex="^(full|chunk)$"),
+
+    # CHUNKING (USED ONLY IF mode=chunk)
+    chunk: int = Query(0, ge=0),
+    chunk_size: int = Query(8000, ge=1000, le=20000),
 ) -> Dict[str, Any]:
     base, resolution_method = await resolve_with_optional_base(topic, wiki)
 
@@ -667,7 +677,7 @@ async def page(
     requested_title = title
     resolved_title = None
 
-    # Resolve title only if provided
+    # Resolve title if provided
     if title:
         episode_title = normalize_episode_title(title)
         lookup_title = episode_title or title
@@ -678,7 +688,6 @@ async def page(
             fallback = await resolve_via_http_redirect(base, lookup_title)
             resolved_title = fallback or lookup_title
 
-    # Build parse params
     parse_params = {
         "action": "parse",
         "prop": "text",
@@ -701,34 +710,56 @@ async def page(
 
     parse_html = (parse.get("text") or {}).get("*") or ""
     extract_text = extract_all_visible_text(parse_html)
-    source = (
-    "wikipedia"
-    if is_wikipedia(base)
-    else "fandom"
-    if is_fandom(base)
-    else "wiki.gg"
-    )
 
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
 
-    if len(extract_text) > MAX_EXTRACT_CHARS:
+    source = (
+        "wikipedia"
+        if is_wikipedia(base)
+        else "fandom"
+        if is_fandom(base)
+        else "wiki.gg"
+    )
+
+    # ======================================================
+    # MODE: FULL  (GPT ACTIONS USE THIS)
+    # ======================================================
+    if mode == "full":
         return {
             "topic": topic,
             "wiki": base,
             "source": source,
+
+            "requested_title": requested_title,
+            "resolved_title": resolved_title,
             "canonical_title": canonical_title,
+
             "pageid": parsed_pageid,
-            "error": "content_too_large",
-            "view_full_page": (
-                "https://mediawiki-bridge.onrender.com/render"
-                f"?wiki={quote(base)}"
-                f"&topic={quote(canonical_title)}"
-                f"&title={quote(canonical_title.replace(' ', '_'))}"
-            )
+            "url": page_url(base, canonical_title),
+
+            "mode": "full",
+            "extract": extract_text,
+            "extract_source": "parse_full",
         }
 
-        # --- SAFETY NET ---
+    # ======================================================
+    # MODE: CHUNK (ADVANCED CLIENTS)
+    # ======================================================
+    total_len = len(extract_text)
+    total_chunks = (total_len + chunk_size - 1) // chunk_size
+
+    start = chunk * chunk_size
+    end = start + chunk_size
+
+    if start >= total_len:
+        raise HTTPException(
+            status_code=416,
+            detail="chunk out of range",
+        )
+
+    chunk_text = extract_text[start:end]
+
     return {
         "topic": topic,
         "wiki": base,
@@ -741,7 +772,12 @@ async def page(
         "pageid": parsed_pageid,
         "url": page_url(base, canonical_title),
 
-        "extract": extract_text,
+        "mode": "chunk",
+        "chunk": chunk,
+        "chunk_size": chunk_size,
+        "total_chunks": total_chunks,
+        "is_last_chunk": chunk == total_chunks - 1,
+
+        "extract": chunk_text,
         "extract_source": "parse_full",
     }
-
