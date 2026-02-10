@@ -2,7 +2,7 @@ import os
 import re
 # import requests
 import html
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Literal
 from fastapi.responses import HTMLResponse
 
 from urllib.parse import urlparse, quote
@@ -690,14 +690,10 @@ async def page(
     topic: Optional[str] = Query(None, min_length=1),
     wiki: Optional[str] = Query(None),
 
-    
-    # MODE SWITCH (NEW)
-    mode: str = Query("full", regex="^(full|chunk)$"),
-
-    # CHUNKING (USED ONLY IF mode=chunk)
+    mode: Literal["full", "chunk"] = Query("chunk"),
     chunk: int = Query(0, ge=0),
     chunk_size: int = Query(25, ge=5, le=100),
-) -> Dict[str, Any]:
+)-> Dict[str, Any]:
 # 1. Validate request shape FIRST
     if not title and pageid is None:
         raise HTTPException(
@@ -753,6 +749,9 @@ async def page(
 
     parse_html = (parse.get("text") or {}).get("*") or ""
     extract_text = extract_all_visible_text(parse_html)
+    # 🔒 HARD SAFETY CAP
+    if len(extract_text) > MAX_EXTRACT_CHARS:
+        extract_text = extract_text[:MAX_EXTRACT_CHARS]
 
     if not extract_text:
         raise HTTPException(status_code=404, detail="no extractable content")
@@ -768,6 +767,11 @@ async def page(
     # ======================================================
     # MODE: FULL  (GPT ACTIONS USE THIS)
     # ======================================================
+    if mode == "full" and len(extract_text) > chunk_size:
+        raise HTTPException(
+            status_code=413,
+            detail="full mode disabled for large pages; use chunk mode"
+        )
     if mode == "full":
         return {
             "topic": topic,
