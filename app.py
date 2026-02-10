@@ -696,7 +696,7 @@ async def page(
 
     # CHUNKING (USED ONLY IF mode=chunk)
     chunk: int = Query(0, ge=0),
-    chunk_size: int = Query(8000, ge=1000, le=20000),
+    chunk_size: int = Query(200, ge=100, le=500),
 ) -> Dict[str, Any]:
 # 1. Validate request shape FIRST
     if not title and pageid is None:
