@@ -612,9 +612,11 @@ async def search(
             "list": "search",
             "srsearch": q,
             "srlimit": limit,
+            "srprop": "snippet|timestamp",
             "format": "json",
         },
     )
+
 
     results: List[Dict[str, Any]] = []
     for item in data.get("query", {}).get("search", []):
@@ -624,13 +626,15 @@ async def search(
         title_str = str(title_val).strip()
         if not title_str:
             continue
-
+    snippet = clean_snippet(item.get("snippet"))
+    if not snippet:
+        snippet = "(No text preview available)"
         results.append(
             {
                 "title": title_str,
                 "pageid": item.get("pageid"),
                 "url": page_url(base, title_str),
-                "snippet": clean_snippet(item.get("snippet")),
+                "snippet": snippet,
                 "timestamp": item.get("timestamp"),
             }
         )
