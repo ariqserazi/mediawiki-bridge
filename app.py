@@ -625,11 +625,16 @@ async def render(
 
 @app.get("/search")
 async def search(
-    topic: str = Query(..., min_length=1),
     q: str = Query(..., min_length=1),
+    topic: Optional[str] = Query(None, min_length=1),
     limit: int = Query(5, ge=1, le=20),
     wiki: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
+    if not wiki and not topic:
+        raise HTTPException(
+            status_code=400,
+            detail="Either wiki or topic must be provided"
+        )
     base, resolution_method = await resolve_with_optional_base(topic, wiki)
 
     data = await mediawiki_get(
@@ -680,11 +685,12 @@ async def search(
 
 @app.get("/page")
 async def page(
-    topic: str = Query(..., min_length=1),
-    title: Optional[str] = Query(None),
-    pageid: Optional[int] = Query(None),
+    title: Optional[str] = Query(None, min_length=1),
+    pageid: Optional[int] = Query(None, ge=1),
+    topic: Optional[str] = Query(None, min_length=1),
     wiki: Optional[str] = Query(None),
 
+    
     # MODE SWITCH (NEW)
     mode: str = Query("full", regex="^(full|chunk)$"),
 
@@ -692,14 +698,25 @@ async def page(
     chunk: int = Query(0, ge=0),
     chunk_size: int = Query(8000, ge=1000, le=20000),
 ) -> Dict[str, Any]:
-    base, resolution_method = await resolve_with_optional_base(topic, wiki)
-
+# 1. Validate request shape FIRST
     if not title and pageid is None:
         raise HTTPException(
             status_code=400,
             detail="Either title or pageid must be provided",
         )
 
+    if not wiki and not topic:
+        raise HTTPException(
+            status_code=400,
+            detail="Either wiki or topic must be provided"
+        )
+
+    # 2. Normalize wiki if provided
+    if wiki and not wiki.startswith(("http://", "https://")):
+        wiki = "https://" + wiki
+
+    # 3. ONLY NOW resolve base
+    base, resolution_method = await resolve_with_optional_base(topic, wiki)
     requested_title = title
     resolved_title = None
 
