@@ -38,13 +38,13 @@ MAX_EXTRACT_CHARS = 20000  # adjust as needed
 async def fandom_hub_lookup(topic: str) -> Optional[str]:
     """
     Use Fandom's global search to discover the real wiki base.
-    Returns base URL like https://lagooncompany.fandom.com
+    Extracts base wiki URL from article URLs.
     """
     search_url = "https://www.fandom.com/api/v1/Search/List"
 
     params = {
         "query": topic,
-        "limit": 5,
+        "limit": 10,
         "ns": 0,
     }
 
@@ -56,23 +56,42 @@ async def fandom_hub_lookup(topic: str) -> Optional[str]:
             if r.status_code != 200:
                 return None
 
-            data = r.json()
-            items = data.get("items", [])
-
+            items = r.json().get("items", [])
             for item in items:
-                wiki_url = item.get("url")
-                if not wiki_url:
+                url = item.get("url")
+                if not url:
                     continue
 
-                parsed = urlparse(wiki_url)
+                parsed = urlparse(url)
                 host = parsed.hostname or ""
-                if host.endswith("fandom.com"):
-                    return f"{parsed.scheme}://{host}"
+                if not host.endswith("fandom.com"):
+                    continue
+
+                base = f"{parsed.scheme}://{host}"
+
+                # 🔒 VERIFY THIS IS A REAL MEDIAWIKI API
+                for api in candidate_action_apis(base):
+                    try:
+                        probe = await client.get(
+                            api,
+                            params={
+                                "action": "query",
+                                "list": "search",
+                                "srsearch": topic,
+                                "srlimit": 1,
+                                "format": "json",
+                            },
+                        )
+                        if probe.status_code == 200:
+                            return base
+                    except Exception:
+                        continue
 
         except Exception:
             return None
 
     return None
+
 def strip_html_to_text(raw_html: str) -> str:
     if not raw_html:
         return ""
@@ -359,6 +378,13 @@ async def _probe_api(client: httpx.AsyncClient, api_url: str, hint: str) -> bool
 
 
 async def resolve_topic(topic: str) -> tuple[str, str]:
+    # # Final safeguard: require explicit wiki for ambiguous fandoms
+    # if " " in topic:
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail="Ambiguous fandom topic; explicit wiki parameter required"
+    #     )
+
     if topic.startswith("http://") or topic.startswith("https://"):
         base = normalize_base(topic)
         if not host_is_allowed(base):
