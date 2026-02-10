@@ -1,6 +1,6 @@
 import os
 import re
-import requests
+# import requests
 import html
 from typing import Any, Dict, Optional, List
 from fastapi.responses import HTMLResponse
