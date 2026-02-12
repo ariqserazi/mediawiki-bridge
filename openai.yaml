@@ -1,0 +1,264 @@
+openapi: 3.1.0
+
+info:
+  title: MediaWiki Bridge
+  version: 3.0.0
+  description: >
+    Canon-safe MediaWiki bridge restricted to Fandom, wiki.gg, and Wikipedia.
+    Supports optional chunked retrieval for large pages.
+
+servers:
+  - url: https://your-deployment-url.com
+    description: Replace with your deployment URL
+    
+paths:
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                required:
+                  - ok
+
+
+  /resolve:
+    get:
+      operationId: resolveWiki
+      summary: Resolve a topic to a working Fandom or wiki.gg wiki base
+      parameters:
+        - name: topic
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+
+        - name: wiki
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uri
+
+      responses:
+        "200":
+          description: Resolved wiki base
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  topic:
+                    type: string
+                  wiki:
+                    type: string
+                    format: uri
+                  resolution_method:
+                    type: string
+                required:
+                  - topic
+                  - wiki
+
+
+  /search:
+    get:
+      operationId: searchWiki
+      summary: Search pages on a resolved wiki
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+
+        - name: topic
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+
+        - name: wiki
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uri
+
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  topic:
+                    type: string
+                  wiki:
+                    type: string
+                    format: uri
+                  query:
+                    type: string
+                  limit:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title:
+                          type: string
+                        pageid:
+                          type: integer
+                        url:
+                          type: string
+                          format: uri
+                        snippet:
+                          type: string
+                        timestamp:
+                          type: string
+                      required:
+                        - title
+                        - url
+                required:
+                  - wiki
+                  - query
+                  - results
+
+
+  /page:
+    get:
+      operationId: getWikiPage
+      summary: Retrieve a wiki page. Large pages may be returned in chunks.
+      parameters:
+
+        - name: title
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+
+        - name: pageid
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+
+        - name: topic
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+
+        - name: wiki
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uri
+
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [full, chunk]
+            default: chunk
+          description: Retrieval mode. Defaults to chunk.
+
+        - name: chunk
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: 0-based chunk index.
+
+        - name: chunk_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 4000
+            maximum: 100000
+            default: 8000
+          description: Maximum characters per chunk.
+
+      responses:
+        "200":
+          description: Page content (full or chunked)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  topic:
+                    type: string
+                  wiki:
+                    type: string
+                    format: uri
+                  source:
+                    type: string
+                  requested_title:
+                    type: string
+                  resolved_title:
+                    type: string
+                  canonical_title:
+                    type: string
+                  pageid:
+                    type: integer
+                  url:
+                    type: string
+                    format: uri
+                  mode:
+                    type: string
+                  chunk:
+                    type: integer
+                  chunk_size:
+                    type: integer
+                  total_chunks:
+                    type: integer
+                  is_last_chunk:
+                    type: boolean
+                  extract:
+                    type: string
+                  extract_source:
+                    type: string
+                required:
+                  - wiki
+                  - canonical_title
+                  - url
+                  - extract
+
+        "404":
+          description: Page not found
+
+        "416":
+          description: Chunk out of range
+
+        "502":
+          description: Upstream MediaWiki error
