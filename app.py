@@ -18,27 +18,32 @@ app = FastAPI(
     version="1.5.1",
 )
 @app.middleware("http")
-async def access_log(request: Request, call_next):
-    start = time.time()
+async def request_diagnostics(request: Request, call_next):
+    start_time = time.time()
 
-    # Standard proxy-aware client address resolution
+    # Resolve client address, accounting for proxy headers
     forwarded_for = request.headers.get("x-forwarded-for")
-    client_addr = (
-        forwarded_for.split(",")[0].strip()
-        if forwarded_for
-        else (request.client.host if request.client else "unknown")
-    )
+
+    if forwarded_for:
+        client_addr = forwarded_for.split(",")[0].strip()
+    else:
+        client_addr = request.client.host if request.client else "unknown"
+
+    service_addr = request.client.host if request.client else "unknown"
+
+    client_agent = request.headers.get("user-agent", "unknown")
+
+    print("\n=== Request Diagnostics ===")
+    print(f"Client Address: {client_addr}")
+    print(f"Service Address: {service_addr}")
+    print(f"Client Agent: {client_agent}")
+    print(f"Endpoint: {request.url.path}")
+    print(f"Parameters: {request.url.query}")
 
     response = await call_next(request)
 
-    duration = round((time.time() - start) * 1000, 2)
-
-    print(
-        f"{request.method} {request.url.path} "
-        f"{response.status_code} "
-        f"{duration}ms "
-        f"client={client_addr}"
-    )
+    print(f"Response Status: {response.status_code}")
+    print("================================\n")
 
     return response
 
