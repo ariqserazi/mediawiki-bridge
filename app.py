@@ -21,7 +21,11 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 import time
 
-BLOCKED = {"52.255.111.20"}
+BLOCKED = set(
+    ip.strip()
+    for ip in os.getenv("BLOCKED_IPS", "").split(",")
+    if ip.strip()
+)
 
 @app.middleware("http")
 async def request_diagnostics(request: Request, call_next):
@@ -44,7 +48,7 @@ async def request_diagnostics(request: Request, call_next):
     print(f"Endpoint: {request.url.path}")
     print(f"Parameters: {request.url.query}")
 
-    # BLOCK HERE
+    
     if client_addr in BLOCKED:
         print(f"Blocked request from {client_addr}")
         print("================================\n")
