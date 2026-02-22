@@ -1,4 +1,4 @@
-# 📚 MediaWiki Bridge for Lore GPT Actions
+# 📚 MediaWiki Bridge :D
 
 ✨ Canon first infrastructure for lore accurate GPTs ✨
 
