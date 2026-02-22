@@ -1,0 +1,30 @@
+# Ignore specific files
+/oldcode
+/test
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environments
+venv/
+.env/
+.env.local
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Docker
+*.tar
+
+# Render / deployment artifacts
+.render/
+
+# Misc
+*.sqlite3
