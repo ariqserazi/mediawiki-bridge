@@ -21,25 +21,21 @@ app = FastAPI(
 async def render_request_logger(request: Request, call_next):
     start_time = time.time()
 
-    client_ip = request.client.host if request.client else "unknown"
-    method = request.method
-    path = request.url.path
-    query = str(request.url.query)
+    real_ip = request.headers.get("x-forwarded-for", None)
+    render_ip = request.client.host if request.client else "unknown"
+
     user_agent = request.headers.get("user-agent", "unknown")
 
     print("\n=== MediaWiki Bridge Request ===")
-    print(f"IP: {client_ip}")
-    print(f"Method: {method}")
-    print(f"Path: {path}")
-    print(f"Query: {query}")
+    print(f"Real IP: {real_ip}")
+    print(f"Render Internal IP: {render_ip}")
     print(f"User-Agent: {user_agent}")
+    print(f"Path: {request.url.path}")
+    print(f"Query: {request.url.query}")
 
     response = await call_next(request)
 
-    duration = round((time.time() - start_time) * 1000, 2)
-
     print(f"Status: {response.status_code}")
-    print(f"Duration: {duration} ms")
     print("================================\n")
 
     return response
