@@ -17,11 +17,16 @@ app = FastAPI(
     title="MediaWiki Bridge API",
     version="1.5.1",
 )
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import time
+
+BLOCKED = {"52.255.111.20"}
+
 @app.middleware("http")
 async def request_diagnostics(request: Request, call_next):
     start_time = time.time()
 
-    # Resolve client address, accounting for proxy headers
     forwarded_for = request.headers.get("x-forwarded-for")
 
     if forwarded_for:
@@ -30,7 +35,6 @@ async def request_diagnostics(request: Request, call_next):
         client_addr = request.client.host if request.client else "unknown"
 
     service_addr = request.client.host if request.client else "unknown"
-
     client_agent = request.headers.get("user-agent", "unknown")
 
     print("\n=== Request Diagnostics ===")
@@ -40,9 +44,22 @@ async def request_diagnostics(request: Request, call_next):
     print(f"Endpoint: {request.url.path}")
     print(f"Parameters: {request.url.query}")
 
+    # BLOCK HERE
+    if client_addr in BLOCKED:
+        print(f"Blocked request from {client_addr}")
+        print("================================\n")
+
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Access denied"}
+        )
+
     response = await call_next(request)
 
+    duration = (time.time() - start_time) * 1000
+
     print(f"Response Status: {response.status_code}")
+    print(f"Duration: {duration:.2f} ms")
     print("================================\n")
 
     return response
