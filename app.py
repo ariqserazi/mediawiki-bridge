@@ -18,25 +18,27 @@ app = FastAPI(
     version="1.5.1",
 )
 @app.middleware("http")
-async def render_request_logger(request: Request, call_next):
-    start_time = time.time()
+async def access_log(request: Request, call_next):
+    start = time.time()
 
-    real_ip = request.headers.get("x-forwarded-for", None)
-    render_ip = request.client.host if request.client else "unknown"
-
-    user_agent = request.headers.get("user-agent", "unknown")
-
-    print("\n=== MediaWiki Bridge Request ===")
-    print(f"Real IP: {real_ip}")
-    print(f"Render Internal IP: {render_ip}")
-    print(f"User-Agent: {user_agent}")
-    print(f"Path: {request.url.path}")
-    print(f"Query: {request.url.query}")
+    # Standard proxy-aware client address resolution
+    forwarded_for = request.headers.get("x-forwarded-for")
+    client_addr = (
+        forwarded_for.split(",")[0].strip()
+        if forwarded_for
+        else (request.client.host if request.client else "unknown")
+    )
 
     response = await call_next(request)
 
-    print(f"Status: {response.status_code}")
-    print("================================\n")
+    duration = round((time.time() - start) * 1000, 2)
+
+    print(
+        f"{request.method} {request.url.path} "
+        f"{response.status_code} "
+        f"{duration}ms "
+        f"client={client_addr}"
+    )
 
     return response
 
