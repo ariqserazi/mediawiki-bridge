@@ -1,3 +1,4 @@
+![MediaWiki Bridge Logo](assets/owl.png)
 # MediaWiki Bridge
 
 Canonical infrastructure for lore accurate LLM systems
