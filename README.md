@@ -1,5 +1,5 @@
 ![MediaWiki Bridge Logo](assets/owl.png)
-# MediaWiki Bridge
+# MediaWiki Bridge (MCP Adapter)
 
 Canonical infrastructure for lore accurate LLM systems
 
