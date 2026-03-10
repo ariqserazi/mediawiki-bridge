@@ -1,6 +1,6 @@
-# 📚 MediaWiki Bridge :D
+# MediaWiki Bridge 
 
-✨ Canon first infrastructure for lore accurate GPTs ✨
+Canon first infrastructure for lore accurate GPTs 
 
 This project provides a FastAPI based bridge service that allows a Custom GPT Action to pull **canon text directly from MediaWiki powered wikis**, with strict source control and citation discipline.
 
@@ -15,7 +15,7 @@ The end goal is a **Lore GPT** that can explain fictional worlds while always ci
 
 ---
 
-## 🧠 What this project does
+## What this project does
 
 You are building a small but powerful pipeline composed of four parts.
 
@@ -36,19 +36,18 @@ Hosts the Bridge API and provides a stable HTTPS URL required by GPT Actions.
 ### 🔹 4. GPT Action
 Connects ChatGPT to the Bridge API using an OpenAPI schema.
 
-✅ In production usage, only the Bridge API and GPT Action are required.  
+In production usage, only the Bridge API and GPT Action are required.  
 Friends and users do not need Docker or the MCP server.
 
 ---
 
-## 🌍 Supported sources
+## Supported sources
 
 Only canon friendly MediaWiki sources are allowed.
 
 * fandom.com  
 * wiki.gg  
-
-🚫 Wikipedia is intentionally excluded.
+* wikipedia can only be used as a fall back
 
 ---
 
@@ -84,7 +83,7 @@ If your main file is named differently, adjust commands accordingly.
 
 ---
 
-## ⚙️ Environment variables
+## Environment variables
 
 All environment variables are optional.
 
@@ -94,11 +93,11 @@ All environment variables are optional.
 * `HTTP_TIMEOUT`  
   Default value is 30.0 seconds
 
-🔐 No API keys are required.
+No API keys are required.
 
 ---
 
-## 🚀 Running locally without Docker
+## Running locally without Docker
 
 Install dependencies:
 
@@ -204,7 +203,7 @@ Always call resolve first, then pass the returned wiki URL into `search` and `pa
 
 ---
 
-## 🧪 MediaWiki MCP Server
+## MediaWiki MCP Server
 
 This step is optional and intended for local development only.  
 GPT Actions do not talk to MCP directly.
@@ -243,7 +242,7 @@ Recommended call order:
 
 ---
 
-## 🧭 Recommended Lore GPT behavior
+## Recommended Lore GPT behavior
 
 Suggested instruction logic for your Custom GPT:
 
@@ -304,7 +303,7 @@ CORS is usually not required unless you also build a browser based frontend.
 
 ---
 
-## 🔐 Security notes
+## Security notes
 
 Outbound requests are restricted by hostname suffix.
 
@@ -317,19 +316,19 @@ This prevents the service from being abused as a general purpose proxy.
 
 ---
 
-## 📜 License
-
-Choose a license for your repository.
-
-Recommended:
+## License
 
 * MIT
 
 
 ## Privacy Policy
 
-This service does not collect, store, or share personal data.
+This service does not collect or store personal user data.
 
 Requests are used only to retrieve publicly available information from MediaWiki APIs.
-No user identifiers, IP addresses, or request contents are persisted.
+
+Client IP addresses may be temporarily processed for request handling, diagnostics, and abuse prevention, but are not stored persistently or used for tracking.
+
+Abusive traffic may be blocked using temporary IP filtering.
+
 No cookies, analytics, or tracking technologies are used.
