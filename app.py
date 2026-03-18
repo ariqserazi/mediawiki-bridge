@@ -539,22 +539,39 @@ async def mediawiki_get(base: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if not host_is_allowed(base):
         raise HTTPException(status_code=403, detail="wiki host not allowed")
 
-    headers = {"User-Agent": USER_AGENT}
-
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
         last_status: Optional[int] = None
+        last_error: Optional[str] = None
+        last_body: Optional[str] = None
 
         for api in candidate_action_apis(base):
             try:
                 r = await client.get(api, params=params)
                 last_status = r.status_code
+                last_body = r.text[:500]
+
+                print(f"[mediawiki_get] API tried: {api}")
+                print(f"[mediawiki_get] Params: {params}")
+                print(f"[mediawiki_get] Upstream status: {r.status_code}")
+                print(f"[mediawiki_get] Upstream body preview: {last_body}")
+
                 if r.status_code == 200:
                     return r.json()
-            except Exception:
+
+            except Exception as e:
+                last_error = repr(e)
+                print(f"[mediawiki_get] Exception for {api}: {last_error}")
                 continue
 
-    raise HTTPException(status_code=502, detail=f"upstream mediawiki error {last_status or 0}")
-
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "error": "upstream_mediawiki_error",
+            "status": last_status or 0,
+            "exception": last_error,
+            "body_preview": last_body,
+        },
+    )
 
 # -------------------------
 # Routes
