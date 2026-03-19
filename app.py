@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, List, Literal
 from urllib.parse import urlparse, quote
 
@@ -11,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(
     title="MediaWiki Bridge API",
-    version="1.5.2",
+    version="1.6.0",
 )
 
 BLOCKED = set(
@@ -47,7 +48,50 @@ SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE |
 TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
-MAX_EXTRACT_CHARS = 20000
+MAX_EXTRACT_CHARS = int(os.getenv("MAX_EXTRACT_CHARS", "200000"))
+
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "1800"))
+CACHE_MAX_ITEMS = int(os.getenv("CACHE_MAX_ITEMS", "500"))
+
+
+@dataclass
+class CacheEntry:
+    value: Any
+    expires_at: float
+
+
+CACHE: Dict[str, CacheEntry] = {}
+
+
+def _cache_cleanup() -> None:
+    now = time.time()
+
+    expired_keys = [k for k, v in CACHE.items() if v.expires_at <= now]
+    for k in expired_keys:
+        CACHE.pop(k, None)
+
+    if len(CACHE) > CACHE_MAX_ITEMS:
+        sorted_items = sorted(CACHE.items(), key=lambda item: item[1].expires_at)
+        overflow = len(CACHE) - CACHE_MAX_ITEMS
+        for k, _ in sorted_items[:overflow]:
+            CACHE.pop(k, None)
+
+
+def cache_get(key: str) -> Optional[Any]:
+    entry = CACHE.get(key)
+    if not entry:
+        return None
+
+    if entry.expires_at <= time.time():
+        CACHE.pop(key, None)
+        return None
+
+    return entry.value
+
+
+def cache_set(key: str, value: Any, ttl: int = CACHE_TTL_SECONDS) -> None:
+    CACHE[key] = CacheEntry(value=value, expires_at=time.time() + ttl)
+    _cache_cleanup()
 
 
 @app.middleware("http")
@@ -273,6 +317,11 @@ async def mediawiki_get(base: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def fandom_hub_lookup(topic: str) -> Optional[str]:
+    cache_key = f"fandom_hub:{topic.strip().lower()}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     search_url = "https://www.fandom.com/api/v1/Search/List"
     params = {
         "query": topic,
@@ -291,12 +340,14 @@ async def fandom_hub_lookup(topic: str) -> Optional[str]:
             print(f"[fandom_hub_lookup] body_preview={r.text[:500]}")
 
             if r.status_code != 200:
+                cache_set(cache_key, None, ttl=300)
                 return None
 
             try:
                 items = r.json().get("items", [])
             except Exception as e:
                 print(f"[fandom_hub_lookup] json decode failed: {repr(e)}")
+                cache_set(cache_key, None, ttl=300)
                 return None
 
             for item in items:
@@ -328,6 +379,7 @@ async def fandom_hub_lookup(topic: str) -> Optional[str]:
                         if probe.status_code == 200:
                             try:
                                 probe.json()
+                                cache_set(cache_key, base, ttl=3600)
                                 return base
                             except Exception:
                                 continue
@@ -337,8 +389,10 @@ async def fandom_hub_lookup(topic: str) -> Optional[str]:
 
         except Exception as e:
             print(f"[fandom_hub_lookup] exception: {repr(e)}")
+            cache_set(cache_key, None, ttl=300)
             return None
 
+    cache_set(cache_key, None, ttl=300)
     return None
 
 
@@ -454,6 +508,11 @@ async def resolve_topic(topic: str) -> tuple[str, str]:
             raise HTTPException(status_code=403, detail="wiki host not allowed")
         return base, "explicit"
 
+    cache_key = f"resolve_topic:{topic.strip().lower()}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached["base"], cached["method"]
+
     slugs = candidate_slugs(topic)
 
     async with httpx.AsyncClient(
@@ -471,10 +530,20 @@ async def resolve_topic(topic: str) -> tuple[str, str]:
                 for api in candidate_action_apis(base):
                     ok = await _probe_api(client, api, hint=topic)
                     if ok:
+                        cache_set(
+                            cache_key,
+                            {"base": base, "method": "slug"},
+                            ttl=3600,
+                        )
                         return base, "slug"
 
     fandom_base = await fandom_hub_lookup(topic)
     if fandom_base and host_is_allowed(fandom_base):
+        cache_set(
+            cache_key,
+            {"base": fandom_base, "method": "fandom_hub"},
+            ttl=3600,
+        )
         return fandom_base, "fandom_hub"
 
     raise HTTPException(
@@ -493,10 +562,22 @@ async def resolve_with_optional_base(topic: Optional[str], wiki: Optional[str]) 
     if not topic:
         raise HTTPException(status_code=400, detail="Either wiki or topic must be provided")
 
-    return await resolve_topic(topic)
+    cache_key = f"resolve_with_optional_base:{topic.strip().lower()}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached["base"], cached["method"]
+
+    base, method = await resolve_topic(topic)
+    cache_set(cache_key, {"base": base, "method": method}, ttl=3600)
+    return base, method
 
 
 async def resolve_title(base: str, title: str) -> str:
+    cache_key = f"title:{base}:{title.strip().lower()}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
     data = await mediawiki_get(
         base,
         {
@@ -513,10 +594,17 @@ async def resolve_title(base: str, title: str) -> str:
     if not page or "missing" in page:
         raise HTTPException(status_code=404, detail="page not found")
 
-    return page.get("title") or title
+    resolved = page.get("title") or title
+    cache_set(cache_key, resolved, ttl=3600)
+    return resolved
 
 
 async def resolve_via_http_redirect(base: str, title: str) -> Optional[str]:
+    cache_key = f"http_redirect:{base}:{title.strip().lower()}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     url = page_url(base, title)
 
     async with httpx.AsyncClient(
@@ -529,12 +617,16 @@ async def resolve_via_http_redirect(base: str, title: str) -> Optional[str]:
             final = str(r.url)
         except Exception as e:
             print(f"[resolve_via_http_redirect] exception: {repr(e)}")
+            cache_set(cache_key, None, ttl=300)
             return None
 
     if "/wiki/" not in final:
+        cache_set(cache_key, None, ttl=300)
         return None
 
-    return final.split("/wiki/", 1)[1].replace("_", " ")
+    resolved = final.split("/wiki/", 1)[1].replace("_", " ")
+    cache_set(cache_key, resolved, ttl=3600)
+    return resolved
 
 
 def normalize_episode_title(raw: str) -> Optional[str]:
@@ -551,6 +643,11 @@ def normalize_episode_title(raw: str) -> Optional[str]:
 
 
 async def fetch_extract_with_query(base: str, title: str, intro_only: bool) -> str:
+    cache_key = f"extract_query:{base}:{title.strip().lower()}:{int(intro_only)}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     params: Dict[str, Any] = {
         "action": "query",
         "prop": "extracts",
@@ -568,16 +665,25 @@ async def fetch_extract_with_query(base: str, title: str, intro_only: bool) -> s
     page_obj = next(iter(pages.values()), None)
 
     if not page_obj or "missing" in page_obj:
+        cache_set(cache_key, "", ttl=300)
         return ""
 
     extract_val = page_obj.get("extract")
     if not extract_val:
+        cache_set(cache_key, "", ttl=300)
         return ""
 
-    return str(extract_val).strip()
+    result = str(extract_val).strip()
+    cache_set(cache_key, result, ttl=1800)
+    return result
 
 
 async def fetch_extract_with_parse(base: str, title: str) -> str:
+    cache_key = f"extract_parse:{base}:{title.strip().lower()}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     data = await mediawiki_get(
         base,
         {
@@ -592,14 +698,100 @@ async def fetch_extract_with_parse(base: str, title: str) -> str:
     text_obj = (data.get("parse") or {}).get("text") or {}
     parse_html = text_obj.get("*") or ""
     if not parse_html:
+        cache_set(cache_key, "", ttl=300)
         return ""
 
-    return best_paragraphs(str(parse_html), max_paras=10000, max_chars=1000000)
+    result = best_paragraphs(str(parse_html), max_paras=10000, max_chars=1000000)
+    cache_set(cache_key, result, ttl=1800)
+    return result
+
+
+async def get_parsed_page_payload(
+    base: str,
+    page_title: Optional[str] = None,
+    pageid: Optional[int] = None,
+) -> Dict[str, Any]:
+    if pageid is not None:
+        cache_key = f"page_payload:{base}:pageid:{pageid}"
+    else:
+        normalized_title = (page_title or "").strip().lower()
+        cache_key = f"page_payload:{base}:title:{normalized_title}"
+
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    parse_params = {
+        "action": "parse",
+        "prop": "text",
+        "format": "json",
+    }
+
+    if pageid is not None:
+        parse_params["pageid"] = pageid
+    else:
+        parse_params["page"] = page_title
+
+    data = await mediawiki_get(base, parse_params)
+
+    parse = data.get("parse")
+    if not parse:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    canonical_title = parse.get("title")
+    parsed_pageid = parse.get("pageid")
+
+    parse_html = (parse.get("text") or {}).get("*") or ""
+    extract_text = extract_all_visible_text(parse_html)
+
+    if len(extract_text) > MAX_EXTRACT_CHARS:
+        extract_text = extract_text[:MAX_EXTRACT_CHARS]
+
+    if not extract_text:
+        raise HTTPException(status_code=404, detail="no extractable content")
+
+    payload = {
+        "canonical_title": canonical_title,
+        "pageid": parsed_pageid,
+        "extract_text": extract_text,
+    }
+
+    cache_set(cache_key, payload, ttl=1800)
+
+    if canonical_title:
+        canonical_cache_key = f"page_payload:{base}:title:{canonical_title.strip().lower()}"
+        cache_set(canonical_cache_key, payload, ttl=1800)
+
+    if parsed_pageid is not None:
+        pageid_cache_key = f"page_payload:{base}:pageid:{parsed_pageid}"
+        cache_set(pageid_cache_key, payload, ttl=1800)
+
+    return payload
 
 
 @app.get("/health")
 def health() -> Dict[str, bool]:
     return {"ok": True}
+
+
+@app.get("/cache")
+def cache_stats() -> Dict[str, Any]:
+    _cache_cleanup()
+    now = time.time()
+
+    return {
+        "enabled": True,
+        "items": len(CACHE),
+        "max_items": CACHE_MAX_ITEMS,
+        "default_ttl_seconds": CACHE_TTL_SECONDS,
+        "entries": [
+            {
+                "key": key,
+                "expires_in_seconds": max(0, int(entry.expires_at - now)),
+            }
+            for key, entry in sorted(CACHE.items())
+        ],
+    }
 
 
 @app.get("/resolve")
@@ -812,34 +1004,15 @@ async def page(
             fallback = await resolve_via_http_redirect(base, lookup_title)
             resolved_title = fallback or lookup_title
 
-    parse_params = {
-        "action": "parse",
-        "prop": "text",
-        "format": "json",
-    }
+    parsed = await get_parsed_page_payload(
+        base=base,
+        page_title=resolved_title,
+        pageid=pageid,
+    )
 
-    if pageid is not None:
-        parse_params["pageid"] = pageid
-    else:
-        parse_params["page"] = resolved_title
-
-    data = await mediawiki_get(base, parse_params)
-
-    parse = data.get("parse")
-    if not parse:
-        raise HTTPException(status_code=404, detail="page not found")
-
-    canonical_title = parse.get("title")
-    parsed_pageid = parse.get("pageid")
-
-    parse_html = (parse.get("text") or {}).get("*") or ""
-    extract_text = extract_all_visible_text(parse_html)
-
-    if len(extract_text) > MAX_EXTRACT_CHARS:
-        extract_text = extract_text[:MAX_EXTRACT_CHARS]
-
-    if not extract_text:
-        raise HTTPException(status_code=404, detail="no extractable content")
+    canonical_title = parsed["canonical_title"]
+    parsed_pageid = parsed["pageid"]
+    extract_text = parsed["extract_text"]
 
     source = (
         "wikipedia"
@@ -868,7 +1041,7 @@ async def page(
             "url": page_url(base, canonical_title),
             "mode": "full",
             "extract": extract_text,
-            "extract_source": "parse_full",
+            "extract_source": "parse_full_cached",
         }
 
     total_len = len(extract_text)
@@ -901,5 +1074,5 @@ async def page(
         "total_chunks": total_chunks,
         "is_last_chunk": chunk == total_chunks - 1,
         "extract": chunk_text,
-        "extract_source": "parse_full",
+        "extract_source": "parse_full_cached",
     }

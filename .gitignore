@@ -1,6 +1,7 @@
 # Ignore specific files
 /oldcode
 /oldcode2
+/oldcode3
 /test
 
 # Python cache
