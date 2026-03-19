@@ -62,35 +62,71 @@ class CacheEntry:
 
 CACHE: Dict[str, CacheEntry] = {}
 
+CACHE_HITS = 0
+CACHE_MISSES = 0
+CACHE_SETS = 0
+CACHE_EXPIRES = 0
+
+
+def _short_key(key: str, max_len: int = 140) -> str:
+    if len(key) <= max_len:
+        return key
+    return key[:max_len] + "..."
+
 
 def _cache_cleanup() -> None:
     now = time.time()
 
     expired_keys = [k for k, v in CACHE.items() if v.expires_at <= now]
     for k in expired_keys:
+        print(f"[CACHE CLEANUP EXPIRED] key={_short_key(k)}")
         CACHE.pop(k, None)
 
     if len(CACHE) > CACHE_MAX_ITEMS:
         sorted_items = sorted(CACHE.items(), key=lambda item: item[1].expires_at)
         overflow = len(CACHE) - CACHE_MAX_ITEMS
         for k, _ in sorted_items[:overflow]:
+            print(f"[CACHE EVICT] key={_short_key(k)} reason=max_items")
             CACHE.pop(k, None)
 
 
 def cache_get(key: str) -> Optional[Any]:
+    global CACHE_HITS, CACHE_MISSES, CACHE_EXPIRES
+
     entry = CACHE.get(key)
+    short = _short_key(key)
+
     if not entry:
+        CACHE_MISSES += 1
+        print(f"[CACHE MISS] key={short}")
         return None
 
-    if entry.expires_at <= time.time():
+    now = time.time()
+    if entry.expires_at <= now:
+        CACHE_EXPIRES += 1
+        CACHE_MISSES += 1
+        print(f"[CACHE EXPIRED] key={short}")
         CACHE.pop(key, None)
         return None
 
+    CACHE_HITS += 1
+    ttl_left = int(entry.expires_at - now)
+    print(f"[CACHE HIT] key={short} ttl_left={ttl_left}s")
     return entry.value
 
 
 def cache_set(key: str, value: Any, ttl: int = CACHE_TTL_SECONDS) -> None:
-    CACHE[key] = CacheEntry(value=value, expires_at=time.time() + ttl)
+    global CACHE_SETS
+
+    CACHE_SETS += 1
+    short = _short_key(key)
+
+    CACHE[key] = CacheEntry(
+        value=value,
+        expires_at=time.time() + ttl,
+    )
+
+    print(f"[CACHE SET] key={short} ttl={ttl}s size={len(CACHE)}")
     _cache_cleanup()
 
 
@@ -784,6 +820,12 @@ def cache_stats() -> Dict[str, Any]:
         "items": len(CACHE),
         "max_items": CACHE_MAX_ITEMS,
         "default_ttl_seconds": CACHE_TTL_SECONDS,
+        "stats": {
+            "hits": CACHE_HITS,
+            "misses": CACHE_MISSES,
+            "sets": CACHE_SETS,
+            "expired": CACHE_EXPIRES,
+        },
         "entries": [
             {
                 "key": key,
@@ -1003,6 +1045,10 @@ async def page(
         except HTTPException:
             fallback = await resolve_via_http_redirect(base, lookup_title)
             resolved_title = fallback or lookup_title
+    print(
+    f"[PAGE REQUEST] base={base} requested_title={requested_title} "
+    f"resolved_title={resolved_title} pageid={pageid} mode={mode} chunk={chunk}"
+    )
 
     parsed = await get_parsed_page_payload(
         base=base,
